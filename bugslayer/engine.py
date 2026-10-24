@@ -310,24 +310,43 @@ Reply with only a JSON object, no markdown:
 
         # Case 3: FileNotFoundError / no such file
         if "filenotfounderror" in lower_err or "no such file or directory" in lower_err or "can't open file" in lower_err:
-            if entry_points and first_word.startswith("python"):
-                valid_ep = entry_points[0]
+            # 3a: a file name with a small typo (requirement.txt -> requirements.txt)
+            typo = self._close_file_match(failed_cmd, stderr, facts)
+            if typo:
+                wrong, right = typo
+                return {
+                    "explanation": f"`{wrong}` does not exist, but `{right}` does. The README has a typo in the file name.",
+                    "suggested_command": self._replace_token(failed_cmd, wrong, right),
+                    "root_cause_type": "PATH_ERROR",
+                }
+            # 3b: `python X.py` with a script that does not exist -> the real entry point.
+            # Only for running a script; not for `python -m pip install -r missing.txt`.
+            script = re.match(r"^(python3?|py)(?:\s+-[A-Za-z]+)*\s+([^\s-][^\s]*\.py)\b", failed_cmd.strip())
+            py_entries = [ep for ep in entry_points if str(ep).endswith(".py")]
+            if script and py_entries:
+                valid_ep = py_entries[0]
                 return {
                     "explanation": f"The target script in `{failed_cmd}` does not exist. Discovered entry point `{valid_ep}` in the repository.",
-                    "suggested_command": f"{first_word} {valid_ep}",
+                    # keep the rest of the command (python -u app.py --port 80)
+                    "suggested_command": self._replace_token(failed_cmd.strip(), script.group(2), valid_ep),
                     "root_cause_type": "WRONG_ENTRYPOINT",
                 }
 
         # Case 4: Missing Module
-        if "modulenotfounderror" in lower_err or "cannot find module" in lower_err:
-            if "requirements.txt" in facts.get("manifest_files", []):
+        # Python says ModuleNotFoundError, Node says "Cannot find module 'x'";
+        # each gets its own installer. "Cannot find module '/work/index.js'" is a
+        # missing file, not a missing package, so it is not treated as one.
+        python_missing = "modulenotfounderror" in lower_err or "no module named" in lower_err
+        node_missing = bool(re.search(r"cannot find module '(?![./\\]|[a-z]:)", lower_err)) and not python_missing
+        if python_missing or node_missing:
+            if python_missing and "requirements.txt" in facts.get("manifest_files", []):
                 py = "python" if _host_os() == "windows" else "python3"
                 return {
                     "explanation": "A required dependency was missing at runtime because requirements were not installed.",
                     "suggested_command": f"{py} -m pip install -r requirements.txt",
                     "root_cause_type": "DEPENDENCY_ERROR",
                 }
-            if "package.json" in facts.get("manifest_files", []):
+            if node_missing and "package.json" in facts.get("manifest_files", []):
                 return {
                     "explanation": "Node modules were missing at runtime.",
                     "suggested_command": "npm install",
@@ -340,6 +359,47 @@ Reply with only a JSON object, no markdown:
             "suggested_command": failed_cmd,
             "root_cause_type": "UNKNOWN_ERROR",
         }
+
+    @staticmethod
+    def _replace_token(command: str, wrong: str, right: str) -> str:
+        """Replaces one whole word of the command (not part of a longer word)."""
+        return re.sub(r"(?<![\w./-])" + re.escape(wrong) + r"(?![\w.-])", lambda _m: right, command, count=1)
+
+    @staticmethod
+    def _close_file_match(command: str, stderr: str, facts: Dict[str, Any]):
+        """
+        Looks for a file named in the failed command that does not exist while a
+        file with an almost identical name does (one or two letters different).
+        Returns (name in the command, existing name) or None.
+        """
+        import difflib
+        root = Path(facts.get("path", "") or ".")
+        try:
+            names_here = {p.name for p in root.iterdir()}
+        except OSError:
+            return None
+        quoted = set(re.findall(r"['\"]([^'\"\s]+)['\"]", stderr or ""))
+        for token in command.split():
+            token = token.strip("'\"")
+            if token.startswith("-") or not re.search(r"\.\w+$", token) or "://" in token:
+                continue
+            path = Path(token)
+            folder = root / path.parent
+            # only names the error mentions, if it mentions any by name
+            if quoted and not any(q == token or q.endswith("/" + path.name) or q == path.name for q in quoted):
+                continue
+            try:
+                if (root / path).exists() or not folder.is_dir():
+                    continue
+                names = names_here if folder == root else {p.name for p in folder.iterdir()}
+            except OSError:
+                continue
+            same_ext = [n for n in names if Path(n).suffix.lower() == path.suffix.lower()]
+            match = difflib.get_close_matches(path.name, same_ext, n=1, cutoff=0.8)
+            if match and match[0] != path.name:
+                fixed = str(path.parent / match[0]) if str(path.parent) != "." else match[0]
+                return token, fixed
+        return None
 
     @staticmethod
     def _find_fastapi_app(facts: Dict[str, Any]):
