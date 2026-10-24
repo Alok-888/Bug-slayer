@@ -25,7 +25,7 @@ from rich.markup import escape as _e  # shows outside text literally (brackets a
 from rich.table import Table
 
 from bugslayer.engine import AIEngine, ENVIRONMENT_ONLY, OFFLINE_SOURCE
-from bugslayer.executor import CommandExecutor, choose_image, docker_status
+from bugslayer.executor import CommandExecutor, choose_image, docker_status, looks_like_server
 from bugslayer.inspector import CodebaseInspector
 from bugslayer.patcher import DocumentationPatcher
 from bugslayer.safety import UnsafePathError, is_safe_to_read, safe_read_text, safe_write_text
@@ -53,13 +53,28 @@ def print_banner():
     console.print("[dim italic]Autonomous Setup & Documentation Healer for Open-Source Repositories[/dim italic]\n")
 
 
-def generate_setup_script(target_path: Path, commands: list, sections: list = None):
+def _sh_quote_echo(cmd: str) -> str:
+    return cmd.replace("'", "'\"'\"'")
+
+
+def generate_setup_script(target_path: Path, commands: list, sections: list = None,
+                          repo: dict = None, is_remote: bool = False):
     """
     Generates an executable setup.sh script for 1-click execution.
     sections: optional [(folder, commands)] for READMEs in sub-folders; each
     section runs from its own folder.
+
+    The script works from any folder:
+    - local run: setup.sh lives in the project, so it first goes to its own folder;
+    - remote run: setup.sh is saved next to the results, so it downloads the
+      repository first (the README's own clone command if it has one, with the
+      real URL), or reuses the folder if it was already downloaded.
+    The README's clone of this repository and the `cd` into it are replaced by
+    that start-up part. Commands that start a server (which keep running) are
+    moved to the end, so they do not stop the steps after them.
     """
     script_path = target_path / "setup.sh"
+    repo = repo or {}
     lines = [
         "#!/usr/bin/env bash",
         "# Auto-generated 1-click installer by Bug Slayer",
@@ -69,19 +84,78 @@ def generate_setup_script(target_path: Path, commands: list, sections: list = No
         "echo '🚀 Starting automated setup...'",
         "",
     ]
-    if sections:
-        lines[4:4] = ['BS_ROOT="$(pwd)"']
+
+    # --- 1. Go to the project (or download it)
+    clone_cmd, clone_folder, state = None, None, {}
+    root_cmds = []
     for cmd in commands:
-        safe = cmd.replace("'", "'\"'\"'")
-        lines.append(f"echo '▶ Running: {safe}'")
-        lines.append(cmd)
+        run_cmd, _reason, _setup = _plan_clone_step(cmd, repo, state) if repo else (cmd, "", cmd)
+        if clone_cmd is None and state.get("cloned"):
+            for part in re.split(r"\s*&&\s*", _setup):
+                found = _parse_clone(part.strip())
+                if found and (_clones_this_repo(found[0], repo.get("name", "")) or
+                              (repo.get("url") and _repo_basename(found[0]).lower() == _repo_basename(repo["url"]).lower())):
+                    clone_cmd, clone_folder = part.strip(), found[1].rstrip("/")
+                    break
+        if run_cmd:
+            root_cmds.append(run_cmd)
+    if is_remote and repo.get("url"):
+        if clone_cmd is None:
+            clone_folder = repo.get("name") or _repo_basename(repo["url"])
+            clone_cmd = f"git clone {shlex.quote(repo['url'])} {shlex.quote(clone_folder)}"
+        q = shlex.quote(clone_folder)
+        lines += [
+            "# Download the project, or use the folder if it is already here",
+            f"if [ -d {q}/.git ]; then",
+            f"  echo '📁 {_sh_quote_echo(clone_folder)}/ already exists, using it'",
+            "else",
+            f"  echo '▶ Running: {_sh_quote_echo(clone_cmd)}'",
+            f"  {clone_cmd}",
+            "fi",
+            f"cd {q}",
+        ]
+    else:
+        lines += ["# Run from the project folder, wherever this script is started from",
+                  'cd "$(dirname "$0")"']
+    lines += ['BS_ROOT="$(pwd)"', ""]
+
+    # --- 2. The steps; servers wait until the end
+    steps = [(None, c) for c in root_cmds]
     for folder, section_cmds in sections or []:
-        lines += ["", f"# --- {folder}/README.md", f'cd "$BS_ROOT/{folder}"', f"echo '📂 {folder}/'"]
-        for cmd in section_cmds:
-            safe = cmd.replace("'", "'\"'\"'")
-            lines.append(f"echo '▶ Running: {safe}'")
-            lines.append(cmd)
+        steps.append((folder, None))  # marks the start of a section
+        steps += [(folder, c) for c in section_cmds]
+    cmd_indexes = [i for i, (_f, c) in enumerate(steps) if c]
+    server_indexes = [i for i in cmd_indexes if looks_like_server(steps[i][1])]
+    # Only when something comes after a server: it would never be reached.
+    defer = bool(server_indexes) and server_indexes[0] != cmd_indexes[-1]
+    servers = []
+    current = None
+    for i, (folder, cmd) in enumerate(steps):
+        if cmd is None:  # a section starts
+            if current is not None:
+                lines.append('cd "$BS_ROOT"')
+            lines += ["", f"# --- {folder}/README.md", f'cd "$BS_ROOT/{folder}"', f"echo '📂 {folder}/'"]
+            current = folder
+            continue
+        if defer and i in server_indexes:
+            n = len(servers) + 1
+            lines.append(f'BS_SERVER_DIR_{n}="$(pwd)"  # this server starts at the end')
+            servers.append((n, cmd))
+            continue
+        lines.append(f"echo '▶ Running: {_sh_quote_echo(cmd)}'")
+        lines.append(cmd)
+    if current is not None:
         lines.append('cd "$BS_ROOT"')
+
+    if servers:
+        lines += ["", "# --- Start the app (servers keep running; press Ctrl+C to stop)"]
+        if len(servers) > 1:
+            lines.append("trap 'kill $(jobs -p) 2>/dev/null' EXIT")
+        for n, cmd in servers:
+            lines.append(f"echo '▶ Running: {_sh_quote_echo(cmd)}'")
+            lines.append(f'cd "$BS_SERVER_DIR_{n}"')
+            # every server but the last runs in the background
+            lines.append(cmd if n == len(servers) else f"( {cmd} ) &")
     lines.append("")
     lines.append("echo '✨ Setup completed successfully!'")
 
@@ -317,7 +391,8 @@ def _print_all_readmes_summary(facts, process_root: bool, root_result, extra_res
 # Bug Slayer has already downloaded the repository, so a README step that
 # clones the SAME repository (often with a placeholder such as YOUR_USERNAME)
 # is skipped during the test run, together with the `cd` into that folder.
-# The step stays in setup.sh, with the placeholder replaced by the real URL.
+# setup.sh takes care of it: it downloads the real URL (or runs inside the
+# project folder when the project is already on this computer).
 PLACEHOLDER = re.compile(
     r"(?i:your[_-]?(?:user(?:name)?|github|name|org|account|handle))|USERNAME|<[^>]+>|\{[^}]+\}|\[[A-Za-z_ -]+\]"
 )
@@ -368,7 +443,8 @@ def _plan_clone_step(cmd: str, repo: dict, state: dict):
     keep, setup_parts, reasons = [], [], []
     for part in parts:
         clone = _parse_clone(part)
-        if clone and _clones_this_repo(clone[0], repo.get("name", "")):
+        if clone and (_clones_this_repo(clone[0], repo.get("name", "")) or
+                      (repo.get("url") and _repo_basename(clone[0]).lower() == _repo_basename(repo["url"]).lower())):
             url, folder = clone
             state.setdefault("cloned", set()).add(folder.rstrip("/"))
             reasons.append("the repository is already downloaded")
@@ -417,7 +493,7 @@ def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: 
         run_cmd, skip_reason, setup_cmd = _plan_clone_step(cmd, repo, clone_state)
         if run_cmd is None:
             console.print(f"[bold cyan]⏭ Step {idx}:[/bold cyan] [white]`{_e(cmd)}`[/white]")
-            console.print(f"  [dim]Skipped: {_e(skip_reason)}. It stays in setup.sh.[/dim]\n")
+            console.print(f"  [dim]Skipped: {_e(skip_reason)}. setup.sh takes care of it.[/dim]\n")
             verified_commands.append(setup_cmd)
             skipped += 1
             continue
@@ -818,7 +894,8 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
         # ---------------------------------------------------------- 6. Outputs
         if verified_commands or extra_sections:
             try:
-                generate_setup_script(target_path, verified_commands, sections=extra_sections)
+                generate_setup_script(target_path, verified_commands, sections=extra_sections,
+                                      repo=repo_info, is_remote=is_remote)
                 console.print("[bold green]⚡ Generated 1-Click Installer:[/bold green] `setup.sh`")
             except UnsafePathError as e:
                 console.print(f"[bold red]⚠ Did not write setup.sh: {_e(str(e))}[/bold red] "
