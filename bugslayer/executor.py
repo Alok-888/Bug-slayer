@@ -32,9 +32,18 @@ DEFAULT_TIMEOUT = int(os.environ.get("BUGSLAYER_TIMEOUT", "300"))
 SERVER_WAIT = float(os.environ.get("BUGSLAYER_SERVER_WAIT", "4"))
 
 SERVER_PATTERN = re.compile(
+    # Node.js
     r"\b(npm|yarn|pnpm|bun)\s+(run\s+)?(dev|start|serve)\b"
-    r"|\buvicorn\b|\bgunicorn\b|\bflask\s+run\b|\bmanage\.py\s+runserver\b"
-    r"|\bpython3?\s+(app|server|main|run)\.py\b"
+    r"|\bnode\s+(\S*/)?(server|app|index|main)\.(c|m)?js\b|\bnodemon\b"
+    r"|\b(npx\s+)?(next\s+(dev|start)|vite(\s+(dev|preview))?|ng\s+serve|nuxt\s+dev|gatsby\s+develop)(\s|$)"
+    r"|\bnpx\s+(serve|http-server)\b|\bdeno\s+task\s+(dev|start)\b"
+    # Python
+    r"|\buvicorn\b|\bgunicorn\b|\bhypercorn\b|\bdaphne\b|\bflask\b.*\brun\b|\bmanage\.py\s+runserver\b"
+    r"|\bpython3?\s+(\S*/)?(app|server|main|run)\.py\b|\bpython3?\s+-m\s+(http\.server|uvicorn|flask|streamlit|gunicorn)\b"
+    r"|\bstreamlit\s+run\b|\bfastapi\s+(dev|run)\b|\bmkdocs\s+serve\b|\bjupyter\s+(notebook|lab)\b"
+    # Ruby / PHP / static sites
+    r"|\brails\s+(s|server)\b|\bphp\s+-S\b|\bphp\s+artisan\s+serve\b|\bjekyll\s+serve\b|\bhugo\s+server\b"
+    # Containers
     r"|\bdocker[- ]compose\s+up\b(?!.*\s-d\b)",
     re.IGNORECASE,
 )
