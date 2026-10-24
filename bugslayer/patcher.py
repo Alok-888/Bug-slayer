@@ -14,7 +14,7 @@ from bugslayer.safety import is_safe_to_read, safe_write_text
 class DocumentationPatcher:
     @staticmethod
     def heal_readme(readme_path: str, old_cmd: str, new_cmd: str, explanation: str,
-                    line_number: Optional[int] = None) -> Tuple[bool, str]:
+                    line_number: Optional[int] = None, display_name: str = "README.md") -> Tuple[bool, str]:
         """
         Replaces the broken command with the working command in README.md
         and returns a unified diff string.
@@ -45,8 +45,8 @@ class DocumentationPatcher:
         diff = list(difflib.unified_diff(
             original_text.splitlines(keepends=True),
             patched_text.splitlines(keepends=True),
-            fromfile="a/README.md",
-            tofile="b/README.md"
+            fromfile=f"a/{display_name}",
+            tofile=f"b/{display_name}"
         ))
 
         # Write the patched file

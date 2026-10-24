@@ -223,3 +223,77 @@ class CodebaseInspector:
             if in_block and is_shell:
                 lines.append((number, raw))
         return lines
+
+    # ------------------------------------------------------------------ #
+    # Multiple READMEs (e.g. frontend/README.md, backend/README.md)
+    # ------------------------------------------------------------------ #
+    README_NAMES = {"readme.md", "readme", "readme.txt", "readme.markdown"}
+    SKIP_DIRS = {
+        ".git", "node_modules", "venv", ".venv", "env", "__pycache__", "dist", "build",
+        "vendor", "target", "site-packages", ".tox", ".next", ".nuxt", "coverage",
+        "fixtures", "testdata", "third_party",
+    }
+    MAX_DEPTH = 4
+
+    # Used when a README's folder has no manifest file of its own.
+    COMMAND_LANGUAGES = {
+        "npm": "JavaScript/TypeScript", "npx": "JavaScript/TypeScript", "yarn": "JavaScript/TypeScript",
+        "pnpm": "JavaScript/TypeScript", "node": "JavaScript/TypeScript", "bun": "JavaScript/TypeScript",
+        "pip": "Python", "pip3": "Python", "python": "Python", "python3": "Python",
+        "poetry": "Python", "uvicorn": "Python", "flask": "Python", "pytest": "Python",
+        "go": "Go", "cargo": "Rust", "rustc": "Rust",
+    }
+
+    def find_extra_readmes(self, main_readme: str = None) -> List[str]:
+        """
+        Returns README files in sub-folders that contain at least one shell
+        command, sorted by path. The main README (in the repository's own
+        folder) is never included, so the existing single-README flow is
+        unaffected.
+        """
+        found = []
+        root = str(self.target_dir)
+        for folder, subfolders, files in os.walk(root):
+            depth = os.path.relpath(folder, root).count(os.sep) + (0 if folder == root else 1)
+            subfolders[:] = sorted(
+                d for d in subfolders
+                if d not in self.SKIP_DIRS and not d.startswith(".") and depth < self.MAX_DEPTH
+            )
+            if folder == root:
+                continue  # the main README is handled by inspect()
+            for name in sorted(files):
+                if name.lower() not in self.README_NAMES:
+                    continue
+                path = os.path.join(folder, name)
+                if main_readme and os.path.exists(main_readme):
+                    try:
+                        if os.path.samefile(path, main_readme):
+                            continue
+                    except OSError:
+                        pass
+                if self._extract_readme_commands(Path(path)):
+                    found.append(path)
+                break  # one README per folder
+        return found
+
+    def inspect_readme(self, readme_path: str) -> Dict[str, Any]:
+        """
+        Facts for one README in a sub-folder: its folder's languages, manifests,
+        entry points and environment variables (detected with the same code as
+        inspect()), plus that README's own commands.
+        """
+        readme = Path(readme_path).resolve()
+        facts = CodebaseInspector(str(readme.parent)).inspect()
+        facts["has_readme"] = True
+        facts["readme_path"] = str(readme)
+        facts["readme_commands"] = self._extract_readme_commands(readme)
+        facts["relative_path"] = os.path.relpath(str(readme), str(self.target_dir)).replace(os.sep, "/")
+        facts["relative_folder"] = os.path.dirname(facts["relative_path"])
+
+        if not facts["languages"]:
+            for cmd in facts["readme_commands"]:
+                words = cmd["command"].split()
+                lang = self.COMMAND_LANGUAGES.get(words[0].lower()) if words else None
+                if lang and lang not in facts["languages"]:
+                    facts["languages"].append(lang)
+        return facts

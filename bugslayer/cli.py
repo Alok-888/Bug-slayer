@@ -52,8 +52,12 @@ def print_banner():
     console.print("[dim italic]Autonomous Setup & Documentation Healer for Open-Source Repositories[/dim italic]\n")
 
 
-def generate_setup_script(target_path: Path, commands: list):
-    """Generates an executable setup.sh script for 1-click execution."""
+def generate_setup_script(target_path: Path, commands: list, sections: list = None):
+    """
+    Generates an executable setup.sh script for 1-click execution.
+    sections: optional [(folder, commands)] for READMEs in sub-folders; each
+    section runs from its own folder.
+    """
     script_path = target_path / "setup.sh"
     lines = [
         "#!/usr/bin/env bash",
@@ -64,10 +68,19 @@ def generate_setup_script(target_path: Path, commands: list):
         "echo '🚀 Starting automated setup...'",
         "",
     ]
+    if sections:
+        lines[4:4] = ['BS_ROOT="$(pwd)"']
     for cmd in commands:
         safe = cmd.replace("'", "'\"'\"'")
         lines.append(f"echo '▶ Running: {safe}'")
         lines.append(cmd)
+    for folder, section_cmds in sections or []:
+        lines += ["", f"# --- {folder}/README.md", f'cd "$BS_ROOT/{folder}"', f"echo '📂 {folder}/'"]
+        for cmd in section_cmds:
+            safe = cmd.replace("'", "'\"'\"'")
+            lines.append(f"echo '▶ Running: {safe}'")
+            lines.append(cmd)
+        lines.append('cd "$BS_ROOT"')
     lines.append("")
     lines.append("echo '✨ Setup completed successfully!'")
 
@@ -132,8 +145,12 @@ def _choose_sandbox(requested: str) -> str:
     return ""
 
 
-def _export_outputs(target_path: Path, out_dir: Path, readme_changed: bool):
-    """Copies the results out of the temporary clone before it is deleted."""
+def _export_outputs(target_path: Path, out_dir: Path, readme_changed: bool, extra_readmes: list = None):
+    """
+    Copies the results out of the temporary clone before it is deleted.
+    extra_readmes: relative paths of fixed READMEs in sub-folders, saved as
+    VERIFIED_<folder>_README.md (e.g. VERIFIED_backend_README.md).
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     saved = []
     readme = target_path / "README.md"
@@ -141,6 +158,12 @@ def _export_outputs(target_path: Path, out_dir: Path, readme_changed: bool):
         dest = out_dir / "VERIFIED_README.md"
         shutil.copyfile(readme, dest)
         saved.append(("Verified README", dest))
+    for rel in extra_readmes or []:
+        src = target_path / rel
+        if is_safe_to_read(src, target_path) and not src.is_symlink():
+            dest = out_dir / ("VERIFIED_" + re.sub(r"[^A-Za-z0-9._-]", "_", rel))
+            shutil.copyfile(src, dest)
+            saved.append((f"Verified {rel}", dest))
     for name, label in (("fix-readme.patch", "PR patch"), ("setup.sh", "1-Click installer")):
         src = target_path / name
         if is_safe_to_read(src, target_path) and not src.is_symlink():
@@ -155,7 +178,167 @@ def _export_outputs(target_path: Path, out_dir: Path, readme_changed: bool):
     return saved
 
 
-def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: str = None) -> int:
+def _resolve_readme(target_path: Path, readme: str):
+    """Finds the README given with --readme (a path relative to the repository)."""
+    rel = readme.replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    candidate = (target_path / rel.lstrip("/")).resolve()
+    try:
+        candidate.relative_to(target_path)  # must stay inside the repository
+    except ValueError:
+        return None
+    return str(candidate) if candidate.is_file() else None
+
+
+def _same_file(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.abspath(a) == os.path.abspath(b)
+
+
+def _print_all_readmes_summary(facts, process_root: bool, root_result, extra_results: list):
+    """One table for repositories with several READMEs."""
+    table = Table(title="📊 All READMEs", box=box.ROUNDED)
+    for col in ("README", "Language", "Steps", "✔ Passed", "🛡️ Healed", "✘ Failed"):
+        table.add_column(col, style="bold cyan" if col == "README" else "white")
+    if process_root:
+        name = os.path.basename(facts.get("readme_path") or "README.md")
+        langs = ", ".join(facts["languages"]) or "Unknown"
+        if root_result:
+            table.add_row(_e(name), _e(langs), str(root_result["steps"]), str(root_result["passed"]),
+                          str(root_result["healed"]), str(root_result["failed"]))
+        else:
+            table.add_row(_e(name), _e(langs), "-", "-", "-", "[cyan]new README written[/cyan]")
+    for row in extra_results:
+        if row["note"]:
+            table.add_row(_e(row["name"]), _e(row["languages"]), str(row["steps"]), "-", "-", f"[yellow]{row['note']}[/yellow]")
+        else:
+            table.add_row(_e(row["name"]), _e(row["languages"]), str(row["steps"]), str(row["passed"]),
+                          str(row["healed"]), str(row["failed"]))
+    console.print()
+    console.print(table)
+
+
+def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: str,
+                       display_name: str = "README.md", context: str = "",
+                       patch_paths: list = None) -> dict:
+    """
+    Mode 1 for one README: runs its steps, diagnoses failures, verifies fixes
+    and patches the README. Used for the main README and, unchanged, for each
+    extra README in a sub-folder.
+
+    patch_paths: README files whose changes go into fix-readme.patch
+    (default: just this README).
+    """
+    verified_commands = []
+    readme_changed = False
+    passed = failed = healed = 0
+    patch_paths = patch_paths if patch_paths is not None else [facts["readme_path"]]
+
+    for idx, cmd_info in enumerate(facts["readme_commands"], 1):
+        cmd = cmd_info["command"]
+        console.print(f"[bold cyan]▶ Step {idx}:[/bold cyan] [white]`{_e(cmd)}`[/white]")
+
+        with console.status(f"Running step {idx}...", spinner="bouncingBar"):
+            res = executor.run(cmd)
+
+        if res["success"]:
+            console.print("  [bold green]✔ Passed cleanly[/bold green] (Exit code 0)\n")
+            verified_commands.append(cmd)
+            passed += 1
+            continue
+
+        console.print(f"  [bold red]✘ FAILED (Exit code {res['exit_code']})[/bold red]")
+        error_text = (res["stderr"] or res["stdout"] or "").strip()
+        console.print(Panel(_e(error_text[-2000:]) or "Command failed with a non-zero exit code",
+                            title="[red]Terminal Error[/red]", border_style="red"))
+
+        # Invoke AI diagnosis
+        label = engine.models[0] if engine.is_online else "offline rules"
+        console.print(f"\n[bold magenta]🤖 Slaying the bug with {_e(label)}...[/bold magenta]")
+        with console.status("Diagnosing root cause...", spinner="dots"):
+            diagnosis = engine.diagnose_failure(cmd, error_text, facts, readme_text, context=context)
+
+        explanation = diagnosis.get("explanation", "An error occurred during execution.")
+        suggested_cmd = str(diagnosis.get("suggested_command") or cmd).strip()
+        source = diagnosis.get("source", "unknown")
+        env_only = diagnosis.get("root_cause_type") == ENVIRONMENT_ONLY
+
+        if source == OFFLINE_SOURCE and engine.last_error:
+            console.print(f"[yellow]⚠ AI unavailable ({_e(str(engine.last_error))}). Using offline rules.[/yellow]")
+
+        console.print(Panel(
+            f"[bold white]Diagnosis:[/bold white] {_e(explanation)}\n\n"
+            f"[bold green]Suggested Fix:[/bold green] [bold yellow]`{_e(suggested_cmd)}`[/bold yellow]",
+            title=f"[magenta]Diagnosis by {_e(source)}[/magenta]",
+            border_style="magenta",
+        ))
+
+        if suggested_cmd == cmd:
+            console.print("  [bold red]No different command to try. Manual fix needed - stopping here.[/bold red]\n")
+            failed += 1
+            break
+
+        console.print(f"\n[bold cyan]🔁 Verifying suggested fix:[/bold cyan] [white]`{_e(suggested_cmd)}`[/white]")
+        with console.status("Verifying fix...", spinner="bouncingBar"):
+            test_res = executor.run(suggested_cmd)
+
+        if not test_res["success"]:
+            console.print("  [bold red]Suggested fix also failed. Manual fix needed - stopping here.[/bold red]\n")
+            failed += 1
+            break
+
+        console.print("  [bold green]✔ Fix verified successfully![/bold green]\n")
+        verified_commands.append(suggested_cmd)
+
+        if env_only:
+            console.print(Panel(
+                "The README is fine for other computers. This failure only happens on this "
+                "machine, so the README was [bold]not[/bold] changed.\n"
+                f"On this machine use: [bold yellow]{_e(suggested_cmd)}[/bold yellow]",
+                title="[cyan]ℹ Machine-specific difference[/cyan]",
+                border_style="cyan",
+            ))
+            passed += 1
+            continue
+
+        new_raw = cmd_info["raw"].replace(cmd, suggested_cmd, 1)
+        ok, diff = DocumentationPatcher.heal_readme(
+            facts["readme_path"], cmd_info["raw"], new_raw, explanation,
+            line_number=cmd_info.get("line"), display_name=display_name,
+        )
+        if ok and diff:
+            readme_changed = True
+            healed += 1
+            console.print(Panel(
+                Syntax(diff, "diff", theme="monokai", line_numbers=True),
+                title=f"[green]🛡️ Patched {_e(display_name)} (Unified Diff)[/green]",
+                border_style="green",
+            ))
+            patch_file = target_path / "fix-readme.patch"
+            existing = safe_read_text(patch_file, target_path)
+            # Re-diff the whole file against git so several fixes become one patch.
+            try:
+                safe_write_text(patch_file, _full_patch(target_path, patch_paths) or (existing + diff),
+                                root=target_path, newline="\n")
+            except UnsafePathError as e:
+                console.print(f"[yellow]⚠ Did not write fix-readme.patch: {_e(str(e))}[/yellow]")
+            console.print("[bold green]✨ Documentation healed and verified![/bold green]\n")
+
+    console.print(Panel(
+        f"[green]✔ {passed} passed[/green]   [cyan]🛡️ {healed} healed[/cyan]   "
+        f"[red]✘ {failed} need a manual fix[/red]   of {len(facts['readme_commands'])} steps",
+        title="[bold]Summary[/bold]", border_style="white",
+    ))
+    return {"verified_commands": verified_commands, "readme_changed": readme_changed,
+            "passed": passed, "healed": healed, "failed": failed,
+            "steps": len(facts["readme_commands"])}
+
+
+def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: str = None,
+                 readme: str = None, max_readmes: int = 10) -> int:
     """Runs Bug Slayer on a GitHub URL or local folder. Returns an exit code."""
     print_banner()
 
@@ -194,7 +377,29 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
 
         # ---------------------------------------------------------- 2. Inspect
         with console.status("[bold green]Inspecting codebase facts...", spinner="dots"):
-            facts = CodebaseInspector(str(target_path)).inspect()
+            inspector = CodebaseInspector(str(target_path))
+            facts = inspector.inspect()
+
+            # Extra READMEs in sub-folders (e.g. frontend/, backend/). With none,
+            # everything below runs exactly as for a single-README repository.
+            main_readme = facts.get("readme_path")
+            process_root = True
+            if readme:
+                selected = _resolve_readme(target_path, readme)
+                if selected is None:
+                    console.print(f"[bold red]Error:[/bold red] README '{_e(readme)}' was not found in this repository.")
+                    return 1
+                if main_readme and _same_file(selected, main_readme):
+                    extra_paths = []
+                else:
+                    process_root = False
+                    extra_paths = [selected]
+            else:
+                extra_paths = inspector.find_extra_readmes(main_readme)
+            skipped_extra = max(0, len(extra_paths) - max(0, max_readmes))
+            extra_paths = extra_paths[:max(0, max_readmes)]
+            extras = [inspector.inspect_readme(p) for p in extra_paths]
+        all_readme_paths = ([main_readme] if main_readme and process_root else []) + [e["readme_path"] for e in extras]
 
         # ---------------------------------------------------------- 3. Sandbox
         mode = _choose_sandbox(sandbox)
@@ -227,6 +432,13 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
         table.add_row("README Status", f"[green]Found ({len(facts['readme_commands'])} commands)[/green]" if facts["has_readme"] else "[red]Missing or empty[/red]")
         table.add_row("Runs In", f"[green]{_e(executor.describe())}[/green]" if mode == "docker" else f"[yellow]{_e(executor.describe())}[/yellow]")
         table.add_row("AI Engine", f"[green]{_e(engine.model_label)}[/green]" if engine.is_online else f"[yellow]{_e(engine.model_label)}[/yellow]")
+        if extras:
+            table.add_row("Other READMEs", _e("\n".join(
+                f"{e['relative_path']} ({', '.join(e['languages']) or 'Unknown'})" for e in extras)))
+        if not process_root:
+            table.add_row("Main README", "[dim]skipped (--readme chose another README)[/dim]")
+        if skipped_extra:
+            table.add_row("Not checked", f"[yellow]{skipped_extra} more README(s) over the --max-readmes limit[/yellow]")
         console.print(table)
         console.print()
 
@@ -237,108 +449,16 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
             readme_text = safe_read_text(facts["readme_path"], target_path)
 
         # ---------------------------------------------------------- 5a. Healer mode
-        if facts["has_readme"] and facts["readme_commands"]:
+        root_result = None
+        if process_root and facts["has_readme"] and facts["readme_commands"]:
             console.print("[bold yellow]⚔️ Mode 1: Verifying README Setup Instructions...[/bold yellow]\n")
-            passed = failed = healed = 0
-
-            for idx, cmd_info in enumerate(facts["readme_commands"], 1):
-                cmd = cmd_info["command"]
-                console.print(f"[bold cyan]▶ Step {idx}:[/bold cyan] [white]`{_e(cmd)}`[/white]")
-
-                with console.status(f"Running step {idx}...", spinner="bouncingBar"):
-                    res = executor.run(cmd)
-
-                if res["success"]:
-                    console.print("  [bold green]✔ Passed cleanly[/bold green] (Exit code 0)\n")
-                    verified_commands.append(cmd)
-                    passed += 1
-                    continue
-
-                console.print(f"  [bold red]✘ FAILED (Exit code {res['exit_code']})[/bold red]")
-                error_text = (res["stderr"] or res["stdout"] or "").strip()
-                console.print(Panel(_e(error_text[-2000:]) or "Command failed with a non-zero exit code",
-                                    title="[red]Terminal Error[/red]", border_style="red"))
-
-                # Invoke AI diagnosis
-                label = engine.models[0] if engine.is_online else "offline rules"
-                console.print(f"\n[bold magenta]🤖 Slaying the bug with {_e(label)}...[/bold magenta]")
-                with console.status("Diagnosing root cause...", spinner="dots"):
-                    diagnosis = engine.diagnose_failure(cmd, error_text, facts, readme_text)
-
-                explanation = diagnosis.get("explanation", "An error occurred during execution.")
-                suggested_cmd = str(diagnosis.get("suggested_command") or cmd).strip()
-                source = diagnosis.get("source", "unknown")
-                env_only = diagnosis.get("root_cause_type") == ENVIRONMENT_ONLY
-
-                if source == OFFLINE_SOURCE and engine.last_error:
-                    console.print(f"[yellow]⚠ AI unavailable ({_e(str(engine.last_error))}). Using offline rules.[/yellow]")
-
-                console.print(Panel(
-                    f"[bold white]Diagnosis:[/bold white] {_e(explanation)}\n\n"
-                    f"[bold green]Suggested Fix:[/bold green] [bold yellow]`{_e(suggested_cmd)}`[/bold yellow]",
-                    title=f"[magenta]Diagnosis by {_e(source)}[/magenta]",
-                    border_style="magenta",
-                ))
-
-                if suggested_cmd == cmd:
-                    console.print("  [bold red]No different command to try. Manual fix needed - stopping here.[/bold red]\n")
-                    failed += 1
-                    break
-
-                console.print(f"\n[bold cyan]🔁 Verifying suggested fix:[/bold cyan] [white]`{_e(suggested_cmd)}`[/white]")
-                with console.status("Verifying fix...", spinner="bouncingBar"):
-                    test_res = executor.run(suggested_cmd)
-
-                if not test_res["success"]:
-                    console.print("  [bold red]Suggested fix also failed. Manual fix needed - stopping here.[/bold red]\n")
-                    failed += 1
-                    break
-
-                console.print("  [bold green]✔ Fix verified successfully![/bold green]\n")
-                verified_commands.append(suggested_cmd)
-
-                if env_only:
-                    console.print(Panel(
-                        "The README is fine for other computers. This failure only happens on this "
-                        "machine, so the README was [bold]not[/bold] changed.\n"
-                        f"On this machine use: [bold yellow]{_e(suggested_cmd)}[/bold yellow]",
-                        title="[cyan]ℹ Machine-specific difference[/cyan]",
-                        border_style="cyan",
-                    ))
-                    passed += 1
-                    continue
-
-                new_raw = cmd_info["raw"].replace(cmd, suggested_cmd, 1)
-                ok, diff = DocumentationPatcher.heal_readme(
-                    facts["readme_path"], cmd_info["raw"], new_raw, explanation,
-                    line_number=cmd_info.get("line"),
-                )
-                if ok and diff:
-                    readme_changed = True
-                    healed += 1
-                    console.print(Panel(
-                        Syntax(diff, "diff", theme="monokai", line_numbers=True),
-                        title="[green]🛡️ Patched README.md (Unified Diff)[/green]",
-                        border_style="green",
-                    ))
-                    patch_file = target_path / "fix-readme.patch"
-                    existing = safe_read_text(patch_file, target_path)
-                    # Re-diff the whole file against git so several fixes become one patch.
-                    try:
-                        safe_write_text(patch_file, _full_patch(target_path, facts["readme_path"]) or (existing + diff),
-                                        root=target_path, newline="\n")
-                    except UnsafePathError as e:
-                        console.print(f"[yellow]⚠ Did not write fix-readme.patch: {_e(str(e))}[/yellow]")
-                    console.print("[bold green]✨ Documentation healed and verified![/bold green]\n")
-
-            console.print(Panel(
-                f"[green]✔ {passed} passed[/green]   [cyan]🛡️ {healed} healed[/cyan]   "
-                f"[red]✘ {failed} need a manual fix[/red]   of {len(facts['readme_commands'])} steps",
-                title="[bold]Summary[/bold]", border_style="white",
-            ))
+            root_result = _heal_readme_steps(executor, engine, facts, target_path, readme_text,
+                                             patch_paths=all_readme_paths or None)
+            verified_commands = root_result["verified_commands"]
+            readme_changed = root_result["readme_changed"]
 
         # ---------------------------------------------------------- 5b. Architect mode
-        else:
+        elif process_root:
             console.print("[bold yellow]🏛️ Mode 2: No Setup Documentation Found. Synthesizing from Scratch...[/bold yellow]\n")
             with console.status("Synthesizing setup & run instructions...", spinner="dots"):
                 plan = engine.generate_guide(facts)
@@ -389,10 +509,67 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
                 border_style="green",
             ))
 
-        # ---------------------------------------------------------- 6. Outputs
-        if verified_commands:
+        # ---------------------------------------------------------- 5c. Extra READMEs
+        extra_results, extra_sections, extra_changed = [], [], []
+        main_environment = engine.environment
+        for ef in extras:
+            rel, folder = ef["relative_path"], ef["relative_folder"]
+            langs = ", ".join(ef["languages"]) or "Unknown"
+            row = {"name": rel, "languages": langs, "steps": len(ef["readme_commands"]),
+                   "passed": 0, "healed": 0, "failed": 0, "note": ""}
+            console.print(f"\n[bold yellow]📄 Checking {_e(rel)}[/bold yellow] [dim]({_e(langs)})[/dim]\n")
+            if not ef["readme_commands"]:
+                console.print("[dim]No setup commands in this README - nothing to test.[/dim]")
+                row["note"] = "no commands"
+                extra_results.append(row)
+                continue
+
+            sub_executor = None
             try:
-                generate_setup_script(target_path, verified_commands)
+                if mode == "docker":
+                    sub_image = choose_image(ef["languages"])
+                    with console.status(f"[bold green]Preparing Docker sandbox ({_e(sub_image)})...", spinner="dots"):
+                        pulled = CommandExecutor.ensure_image(sub_image)
+                    if not pulled["success"]:
+                        console.print(f"[bold red]Could not download the Docker image {_e(sub_image)}:[/bold red]\n{_e(pulled['stderr'])}")
+                        row["note"] = "sandbox image unavailable"
+                        extra_results.append(row)
+                        continue
+                    with console.status("[bold green]Starting a fresh sandbox...", spinner="dots"):
+                        sub_executor = CommandExecutor(str(target_path), mode="docker", image=sub_image, start_in=folder)
+                else:
+                    sub_executor = CommandExecutor(str(target_path), mode="local", start_in=folder)
+                console.print(f"[dim]Runs in: {_e(sub_executor.describe())}, starting in {_e(folder)}/[/dim]\n")
+
+                engine.environment = sub_executor.environment_for_ai()
+                result = _heal_readme_steps(
+                    sub_executor, engine, ef, target_path,
+                    safe_read_text(ef["readme_path"], target_path),
+                    display_name=rel,
+                    context=f"This is {rel}, a {langs} project in the folder {folder}/ of the repository.",
+                    patch_paths=all_readme_paths,
+                )
+                row.update({k: result[k] for k in ("passed", "healed", "failed")})
+                if result["verified_commands"]:
+                    extra_sections.append((folder, result["verified_commands"]))
+                if result["readme_changed"]:
+                    extra_changed.append(rel)
+            except RuntimeError as e:
+                console.print(f"[bold red]Could not test {_e(rel)}:[/bold red] {_e(str(e))}")
+                row["note"] = "sandbox failed to start"
+            finally:
+                if sub_executor:
+                    sub_executor.close()
+                engine.environment = main_environment
+            extra_results.append(row)
+
+        if extras:
+            _print_all_readmes_summary(facts, process_root, root_result, extra_results)
+
+        # ---------------------------------------------------------- 6. Outputs
+        if verified_commands or extra_sections:
+            try:
+                generate_setup_script(target_path, verified_commands, sections=extra_sections)
                 console.print("[bold green]⚡ Generated 1-Click Installer:[/bold green] `setup.sh`")
             except UnsafePathError as e:
                 console.print(f"[bold red]⚠ Did not write setup.sh: {_e(str(e))}[/bold red] "
@@ -400,7 +577,7 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
 
         if is_remote:
             out_dir = Path(output) if output else Path.cwd() / "bugslayer_output" / _repo_name(target)
-            saved = _export_outputs(target_path, out_dir.resolve(), readme_changed)
+            saved = _export_outputs(target_path, out_dir.resolve(), readme_changed, extra_readmes=extra_changed)
             if saved:
                 console.print(Panel(
                     "\n".join(f"{_e(label)}: [bold yellow]{_e(str(path))}[/bold yellow]" for label, path in saved),
@@ -429,11 +606,15 @@ def _host_python(cmd: str, mode: str) -> str:
     return cmd
 
 
-def _full_patch(repo: Path, readme_path: str) -> str:
-    """git diff of the README if the folder is a git repo, so all fixes are in one patch."""
+def _full_patch(repo: Path, readme_path) -> str:
+    """
+    git diff of the README(s) if the folder is a git repo, so all fixes are in
+    one patch. readme_path: one path, or a list of paths.
+    """
     try:
-        rel = os.path.relpath(readme_path, repo)
-        res = subprocess.run(["git", "-C", str(repo), "diff", "--", rel], capture_output=True,
+        paths = [readme_path] if isinstance(readme_path, (str, Path)) else list(readme_path)
+        rels = [os.path.relpath(p, repo) for p in paths]
+        res = subprocess.run(["git", "-C", str(repo), "diff", "--", *rels], capture_output=True,
                              text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=30)
         return res.stdout if res.returncode == 0 else ""
     except Exception:
@@ -453,8 +634,13 @@ def main():
                        help="run commands directly on this computer (not isolated)")
     parser.add_argument("--model", help="AI model to use (default: gemma-4-26b-a4b-it)")
     parser.add_argument("--output", help="folder for results of a remote run (default: ./bugslayer_output/<repo>)")
+    parser.add_argument("--readme", help="check only this README, e.g. backend/README.md (default: the main README "
+                                         "plus READMEs found in sub-folders)")
+    parser.add_argument("--max-readmes", type=int, default=10,
+                        help="most READMEs in sub-folders to check (default: 10)")
     args = parser.parse_args()
-    sys.exit(run_pipeline(args.target, sandbox=args.sandbox or "auto", model=args.model, output=args.output))
+    sys.exit(run_pipeline(args.target, sandbox=args.sandbox or "auto", model=args.model, output=args.output,
+                          readme=args.readme, max_readmes=args.max_readmes))
 
 
 if __name__ == "__main__":

@@ -165,12 +165,17 @@ class AIEngine:
     # Public API
     # ------------------------------------------------------------------ #
     def diagnose_failure(self, failed_cmd: str, stderr: str, facts: Dict[str, Any],
-                         readme_text: str = "") -> Dict[str, Any]:
-        """Diagnoses why a README command failed and suggests the exact fix."""
+                         readme_text: str = "", context: str = "") -> Dict[str, Any]:
+        """
+        Diagnoses why a README command failed and suggests the exact fix.
+        context: optional extra line for repositories with several READMEs,
+        e.g. "This is backend/README.md, a Python project in the folder backend/."
+        """
         if self.client:
+            context_line = f"{context}\n" if context else ""
             prompt = f"""You are Bug Slayer, an autonomous open-source setup healer.
 A beginner followed a repository's README.md and this command failed.
-
+{context_line}
 Where the command ran: {self.environment}
 Command: `{failed_cmd}`
 
