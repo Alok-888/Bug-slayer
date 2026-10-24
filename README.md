@@ -110,8 +110,19 @@ When run on a remote repository, Bug Slayer:
 | `--local` | Runs the steps directly on this computer (not isolated; use only for repos you trust) |
 | `--model NAME` | Uses another model, e.g. `--model gemma-4-31b-it` |
 | `--output DIR` | Saves results of a remote run to `DIR` |
+| `--readme PATH` | Checks only that README, e.g. `--readme backend/README.md` |
+| `--max-readmes N` | Checks at most `N` READMEs in sub-folders (default 10) |
 
 Environment variables: `GEMINI_API_KEY` (AI key), `BUGSLAYER_MODEL`, `BUGSLAYER_IMAGE` (sandbox image), `BUGSLAYER_TIMEOUT` (seconds per step, default 300).
+
+### 🗂️ Projects with several READMEs
+Many projects have a README per part, for example `frontend/README.md` (Node), `backend/README.md` (Python) and `services/api/README.md` (Go). Bug Slayer checks the main README first, then every README in a sub-folder that contains setup commands:
+- Each README is tested in a **fresh sandbox** for its own language (Node, Python, Go or Rust), starting in **its own folder**.
+- Fixes for all READMEs go into **one** `fix-readme.patch`, and each fixed README is saved as `VERIFIED_<folder>_README.md`.
+- A final table shows passed, healed and failed steps for every README.
+- Folders such as `node_modules`, `vendor`, `dist`, test fixtures and hidden folders are skipped.
+
+A repository with a single README works exactly as before.
 
 ---
 

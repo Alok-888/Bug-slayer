@@ -134,7 +134,12 @@ class CommandExecutor:
     """
 
     def __init__(self, working_dir: str, mode: str = "local", languages: Optional[List[str]] = None,
-                 image: Optional[str] = None):
+                 image: Optional[str] = None, start_in: Optional[str] = None):
+        """
+        start_in: optional sub-folder (relative to working_dir, e.g. "backend")
+        where the first step starts, for a README that lives in that folder.
+        Leaving it out starts in the repository's own folder, as before.
+        """
         self.root_dir = os.path.abspath(working_dir)
         self.mode = mode
         self.image = image or choose_image(languages or [])
@@ -142,10 +147,15 @@ class CommandExecutor:
         self._state_dir = tempfile.mkdtemp(prefix="bugslayer_state_")
         self._env_file = os.path.join(self._state_dir, "env.sh").replace("\\", "/")
         self.cwd = self.root_dir
+        sub = (start_in or "").replace("\\", "/").strip("/")
 
         if self.mode == "docker":
             self._start_container()
             self.cwd = "/work"
+            if sub:
+                self.cwd = f"/work/{sub}"
+        elif sub:
+            self.cwd = os.path.join(self.root_dir, *sub.split("/"))
 
     # ------------------------------------------------------------------ #
     # Lifecycle
