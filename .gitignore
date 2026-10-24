@@ -1,0 +1,22 @@
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# System & IDE files
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets
+.env
+.env.local
+
+# Competition deck
+*.pdf
