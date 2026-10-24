@@ -103,6 +103,52 @@ def _remove_tree(path: str):
     shutil.rmtree(path, onerror=on_error)
 
 
+GIT_HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org")
+
+
+def _normalize_target(target: str):
+    """
+    Turns a link copied from the browser into a URL git can clone:
+
+        github.com/owner/repo                      -> https://github.com/owner/repo
+        https://github.com/owner/repo/tree/dev/api -> https://github.com/owner/repo
+        https://github.com/owner/repo#readme       -> https://github.com/owner/repo
+
+    Returns (url, note); note explains what was changed, or is None. A folder
+    that exists on this computer, ssh URLs and other hosts are left as they are.
+    """
+    raw = target.strip()
+    if not raw or os.path.exists(raw) or raw.startswith("git@"):
+        return target, None
+    m = re.match(r"^(?:https?://)?(?:www\.)?(" + "|".join(re.escape(h) for h in GIT_HOSTS) + r")/(.*)$",
+                 raw, re.IGNORECASE)
+    if not m:
+        return target, None
+    host, rest = m.group(1).lower(), re.split(r"[?#]", m.group(2), maxsplit=1)[0]
+    parts = [x for x in rest.split("/") if x]
+    if host == "gitlab.com":  # groups can be nested; the page part starts at "/-/"
+        if "-" in parts:
+            parts = parts[:parts.index("-")]
+        repo_parts, page = parts, []
+    else:
+        repo_parts, page = parts[:2], parts[2:]
+    if len(repo_parts) < 2:
+        return target, None
+    url = f"https://{host}/" + "/".join(repo_parts)
+    if url.endswith(".git"):
+        url = url[:-4]
+    if url == raw.rstrip("/") or url + ".git" == raw.rstrip("/"):
+        return target, None
+    note = f"Using the repository link {url}"
+    # .../blob/<branch>/backend/README.md: point at the README that was open
+    sub = page[2:] if len(page) >= 2 and page[0] in ("tree", "blob", "src") else []
+    if len(sub) > 1 and sub[-1].lower().startswith("readme"):  # a README in a sub-folder
+        note += f" (default branch). To check only that README, add --readme {'/'.join(sub)}"
+    elif page[:1] in (["tree"], ["blob"], ["src"]):
+        note += " (default branch, whole repository)"
+    return url, note
+
+
 def _repo_name(target: str) -> str:
     name = target.rstrip("/").split("/")[-1]
     name = re.sub(r"\.git$", "", name)
@@ -504,6 +550,9 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
     """Runs Bug Slayer on a GitHub URL or local folder. Returns an exit code."""
     print_banner()
 
+    target, target_note = _normalize_target(target)
+    if target_note:
+        console.print(f"[dim]{_e(target_note)}[/dim]")
     is_remote = target.startswith(("http://", "https://", "git@")) or target.endswith(".git")
     temp_dir = None
     executor = None
