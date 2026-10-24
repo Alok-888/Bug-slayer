@@ -515,23 +515,84 @@ class CodebaseInspector:
     def _shell_block_lines(content: str) -> List[Tuple[int, str]]:
         """
         Walks the README line by line and returns (line_number, text) for lines
-        inside shell code blocks (```bash, ```sh, ```shell, ```zsh, ```console
-        or unlabeled ```). Tracking open/close fences explicitly prevents prose
-        between two code blocks from being mistaken for a command.
+        inside shell code blocks:
+
+        - fenced blocks opened with ``` or ~~~ (three or more), labeled bash,
+          sh, shell, zsh, console, terminal or unlabeled. A block is closed
+          only by the same fence character, at least as long as the opening
+          one, so a ~~~ block can contain ``` and the other way round;
+        - indented code blocks (four spaces or a tab after a blank line), the
+          older Markdown style. These are used only when they do not follow a
+          list item (where indented text is part of the list) and do not look
+          like prose.
+
+        Tracking open/close fences explicitly prevents prose between two code
+        blocks from being mistaken for a command.
         """
         shell_langs = {"", "bash", "sh", "shell", "zsh", "console", "terminal"}
+        list_item = re.compile(r"^\s{0,3}([-*+]|\d+[.)])\s")
+        prose_words = {"the", "you", "your", "to", "sure", "and", "is", "are", "this",
+                       "that", "will", "should", "a", "an", "of", "for", "in", "it"}
+
+        def indented(raw: str) -> bool:
+            return raw.startswith("    ") or raw.startswith("\t") or raw.startswith(" \t") \
+                or raw.startswith("  \t") or raw.startswith("   \t")
+
+        def looks_like_prose(raw: str) -> bool:
+            text = raw.strip()
+            if text.startswith(("$ ", "> ")):
+                return False  # a shell prompt: clearly a command
+            words = text.split()
+            if len(words) > 3 and text[-1:] in ".:!?,":
+                return True
+            # ignore quoted text (echo "you are done") when looking for English words
+            unquoted = re.sub(r"\"[^\"]*\"|'[^']*'", " ", text).lower().split()
+            return any(w in prose_words for w in unquoted[1:])
+
         lines: List[Tuple[int, str]] = []
-        in_block, is_shell = False, False
-        for number, raw in enumerate(content.splitlines(), start=1):
-            fence = re.match(r"^\s*```\s*([\w+-]*)", raw)
-            if fence:
-                if not in_block:
-                    in_block, is_shell = True, fence.group(1).lower() in shell_langs
-                else:
-                    in_block = False
+        rows = content.splitlines()
+        fence_char, fence_len, is_shell = "", 0, False
+        prev_blank, after_list = True, False   # state of the text before the current line
+        i = 0
+        while i < len(rows):
+            number, raw = i + 1, rows[i]
+            if fence_char:  # inside a fenced block
+                close = re.match(r"^\s*(`{3,}|~{3,})\s*$", raw)
+                if close and close.group(1)[0] == fence_char and len(close.group(1)) >= fence_len:
+                    fence_char, prev_blank, after_list = "", False, False
+                elif is_shell:
+                    lines.append((number, raw))
+                i += 1
                 continue
-            if in_block and is_shell:
-                lines.append((number, raw))
+
+            fence = re.match(r"^\s*(`{3,}|~{3,})\s*\{?\s*\.?([\w+-]*)", raw)
+            if fence and not (fence.group(1)[0] == "`" and "`" in raw[fence.end():]):
+                fence_char, fence_len = fence.group(1)[0], len(fence.group(1))
+                is_shell = fence.group(2).lower() in shell_langs
+                i += 1
+                continue
+
+            if prev_blank and not after_list and indented(raw) and raw.strip():
+                # collect the whole indented block (blank lines may sit inside it)
+                block, j = [], i
+                while j < len(rows) and (indented(rows[j]) or not rows[j].strip()):
+                    if rows[j].strip():
+                        block.append((j + 1, rows[j]))
+                    j += 1
+                if not any(looks_like_prose(r) for _, r in block):
+                    lines.extend(block)
+                i, prev_blank = j, not rows[j - 1].strip()
+                continue
+
+            if raw.strip():
+                if list_item.match(raw):
+                    after_list = True
+                elif not indented(raw) and prev_blank:
+                    after_list = False  # a new paragraph or heading ends the list
+                prev_blank = False
+            else:
+                prev_blank = True
+            i += 1
         return lines
 
     # ------------------------------------------------------------------ #
