@@ -150,3 +150,16 @@ python3 reset_demos.py
 - **CLI & Visualization:** Rich (Terminal UI, AST diff rendering)
 - **Execution Harness:** Docker sandbox (copy of the repo, memory/CPU limits) with a cross-platform local fallback for macOS, Linux and Windows
 - **License:** MIT License
+
+### 📜 Models, Tools & Licenses
+| Component | What we use it for | License |
+|---|---|---|
+| **Gemma 4** (`gemma-4-26b-a4b-it`, backup `gemma-4-31b-it`) | Open-weight model that diagnoses failed steps and writes READMEs | Apache 2.0 |
+| **google-genai** (Python SDK) | Calls Gemma 4 through the Gemini API | Apache 2.0 |
+| **Rich** | Terminal interface: panels, tables, diffs | MIT |
+| **Docker Engine** | Isolated sandbox that runs the README steps | Apache 2.0 |
+| **Python 3.10+** | Language the CLI is written in | PSF License |
+| **Git** | Downloads the repository being checked | GPL-2.0 |
+| **Bug Slayer** (this project) | — | MIT |
+
+Docker Desktop (the app for macOS/Windows) is free for personal, education and small-business use under Docker's own terms; Docker Engine on Linux is open source.
