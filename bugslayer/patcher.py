@@ -14,7 +14,8 @@ from bugslayer.safety import is_safe_to_read, safe_write_text
 class DocumentationPatcher:
     @staticmethod
     def heal_readme(readme_path: str, old_cmd: str, new_cmd: str, explanation: str,
-                    line_number: Optional[int] = None, display_name: str = "README.md") -> Tuple[bool, str]:
+                    line_number: Optional[int] = None, display_name: str = "README.md",
+                    end_line: Optional[int] = None) -> Tuple[bool, str]:
         """
         Replaces the broken command with the working command in README.md
         and returns a unified diff string.
@@ -31,7 +32,13 @@ class DocumentationPatcher:
         lines = original_text.splitlines(keepends=True)
 
         patched_text = None
-        if line_number and 1 <= line_number <= len(lines) and old_cmd.strip() in lines[line_number - 1]:
+        if (line_number and end_line and 1 <= line_number < end_line <= len(lines)
+                and old_cmd.strip() in lines[line_number - 1]):
+            # A command written over several lines (with \\): replace all of them
+            ending = "\n" if lines[end_line - 1].endswith("\n") else ""
+            lines[line_number - 1:end_line] = [new_cmd.rstrip() + ending]
+            patched_text = "".join(lines)
+        elif line_number and 1 <= line_number <= len(lines) and old_cmd.strip() in lines[line_number - 1]:
             target = lines[line_number - 1]
             lines[line_number - 1] = target.replace(old_cmd.strip(), new_cmd.strip(), 1)
             patched_text = "".join(lines)

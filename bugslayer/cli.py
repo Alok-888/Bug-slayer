@@ -380,8 +380,16 @@ def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: 
             console.print(f"  [dim]Running only `{_e(run_cmd)}` ({_e(skip_reason)}).[/dim]")
             cmd = run_cmd
 
-        with console.status(f"Running step {idx}...", spinner="bouncingBar"):
-            res = executor.run(cmd)
+        syntax_error = _syntax_error(cmd) if cmd_info.get("end_line") else ""
+        if syntax_error:
+            # Joining the lines produced an invalid command: report it instead of running it
+            console.print(f"  [yellow]⚠ This command spans README lines {cmd_info['line']}-{cmd_info['end_line']}; "
+                          f"joined, it is not valid shell syntax, so it was not run.[/yellow]")
+            res = {"success": False, "exit_code": 2, "stdout": "",
+                   "stderr": f"Syntax error in the command from lines {cmd_info['line']}-{cmd_info['end_line']}: {syntax_error}"}
+        else:
+            with console.status(f"Running step {idx}...", spinner="bouncingBar"):
+                res = executor.run(cmd)
 
         if res["success"]:
             console.print("  [bold green]✔ Passed cleanly[/bold green] (Exit code 0)\n")
@@ -443,11 +451,17 @@ def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: 
             passed += 1
             continue
 
-        new_raw = cmd_info["raw"].replace(cmd, suggested_cmd, 1)
+        if cmd_info.get("end_line"):
+            # A multi-line command: its lines are replaced by the corrected command
+            indent = cmd_info["raw"][:len(cmd_info["raw"]) - len(cmd_info["raw"].lstrip())]
+            new_raw = indent + suggested_cmd
+        else:
+            new_raw = cmd_info["raw"].replace(cmd, suggested_cmd, 1)
         try:
             ok, diff = DocumentationPatcher.heal_readme(
                 facts["readme_path"], cmd_info["raw"], new_raw, explanation,
                 line_number=cmd_info.get("line"), display_name=display_name,
+                end_line=cmd_info.get("end_line"),
             )
         except OSError as e:
             console.print(f"[yellow]⚠ The fix works, but {_e(display_name)} could not be changed "
@@ -784,6 +798,25 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
             executor.close()
         if temp_dir and os.path.exists(temp_dir):
             _remove_tree(temp_dir)
+
+
+def _syntax_error(command: str) -> str:
+    """
+    Checks a command's shell syntax without running it (bash -n). Returns the
+    error message, or "" if it is fine or bash is not available.
+    """
+    bash = shutil.which("bash")
+    if not bash or sys.platform.startswith("win"):
+        return ""
+    try:
+        res = subprocess.run([bash, "-n", "-c", command], capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", stdin=subprocess.DEVNULL, timeout=10)
+        if res.returncode == 0:
+            return ""
+        # "/usr/bin/bash: -c: line 1: unexpected EOF ..." -> "line 1: unexpected EOF ..."
+        return re.sub(r"^\S*bash: (?:-c: )?", "", res.stderr.strip().splitlines()[0])
+    except Exception:
+        return ""
 
 
 def _origin_url(folder: Path):

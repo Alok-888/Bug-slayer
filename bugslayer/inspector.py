@@ -444,8 +444,8 @@ class CodebaseInspector:
 
         try:
             content = safe_read_text(readme_path, self.target_dir)
-            for line_no, line in self._shell_block_lines(content):
-                cleaned = line.strip()
+            for line_no, end_no, line, joined in self._join_continuations(self._shell_block_lines(content)):
+                cleaned = joined.strip()
                 if not cleaned or cleaned.startswith("#"):
                     continue
 
@@ -457,6 +457,8 @@ class CodebaseInspector:
 
                 first_token = cleaned.split()[0].lower() if cleaned.split() else ""
                 entry = {"raw": line, "command": cleaned, "line": line_no}
+                if end_no > line_no:
+                    entry["end_line"] = end_no  # a command written over several lines with \\
                 if first_token.startswith("./") or first_token.startswith(".\\"):
                     commands.append(entry)
                 elif is_prompt or first_token in KNOWN_COMMAND_PREFIXES or "=" in first_token:
@@ -466,6 +468,48 @@ class CodebaseInspector:
         except Exception:
             pass
         return commands
+
+    @staticmethod
+    def _join_continuations(lines: List[Tuple[int, str]]) -> List[Tuple[int, int, str, str]]:
+        """
+        Joins commands written over several lines with a trailing backslash:
+
+            docker run --rm \\
+              -p 8080:80 \\
+              nginx
+
+        becomes one step, `docker run --rm -p 8080:80 nginx`. Returns
+        (first line number, last line number, first raw line, joined command).
+        Only lines that follow each other in the same code block are joined,
+        and an escaped backslash (\\\\) at the end of a line is not a continuation.
+        """
+        def continues(text: str) -> bool:
+            stripped = text.rstrip()
+            trailing = len(stripped) - len(stripped.rstrip("\\"))
+            return trailing % 2 == 1
+
+        out: List[Tuple[int, int, str, str]] = []
+        i = 0
+        while i < len(lines):
+            start_no, first_raw = lines[i]
+            end_no, text = start_no, first_raw
+            parts = []
+            while continues(text) and i + 1 < len(lines) and lines[i + 1][0] == end_no + 1:
+                parts.append(text.rstrip()[:-1].strip())
+                i += 1
+                end_no, text = lines[i]
+            if continues(text):  # a backslash on the block's last line: nothing to join
+                text = text.rstrip()[:-1]
+            parts.append(text.strip())
+            if len(parts) > 1:
+                joined = " ".join(p for p in parts if p)
+            elif text is first_raw:
+                joined = first_raw  # an ordinary one-line command, unchanged
+            else:
+                joined = parts[0]   # one line ending in a lone backslash
+            out.append((start_no, end_no, first_raw, joined))
+            i += 1
+        return out
 
     @staticmethod
     def _shell_block_lines(content: str) -> List[Tuple[int, str]]:
