@@ -220,19 +220,34 @@ def run_pipeline(target: str):
         if is_remote:
             result_readme = target_path / "README.md"
             if result_readme.exists():
-                local_export = Path("VERIFIED_README.md")
+                local_export = Path.cwd() / "VERIFIED_README.md"
                 local_export.write_text(result_readme.read_text(errors="ignore"), encoding="utf-8")
                 console.print(Panel(
-                    f"Saved verified documentation to local file: [bold yellow]{local_export.resolve()}[/bold yellow]",
+                    f"Saved verified documentation to: [bold yellow]{local_export}[/bold yellow]",
                     title="[bold green]📦 Remote Verification Saved Locally[/bold green]",
                     border_style="green"
                 ))
+
+            result_setup = target_path / "setup.sh"
+            if result_setup.exists():
+                local_setup = Path.cwd() / "setup.sh"
+                local_setup.write_text(result_setup.read_text(errors="ignore"), encoding="utf-8")
+                try:
+                    os.chmod(local_setup, 0o755)
+                except Exception:
+                    pass
+                console.print(f"[bold green]⚡ Saved 1-Click Installer locally to:[/bold green] [bold yellow]{local_setup}[/bold yellow]\n")
 
     finally:
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-if __name__ == "__main__":
+def main():
     target = sys.argv[1] if len(sys.argv) > 1 else "."
     run_pipeline(target)
+
+
+if __name__ == "__main__":
+    main()
+

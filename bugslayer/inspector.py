@@ -159,20 +159,40 @@ class CodebaseInspector:
         return sorted(list(env_vars))
 
     def _extract_readme_commands(self, readme_path: Path) -> List[Dict[str, Any]]:
-        """Extracts bash/sh command blocks from a README.md file."""
+        """Extracts bash/sh command blocks from a README.md file, filtering out text prose."""
         commands = []
+        KNOWN_COMMAND_PREFIXES = {
+            "git", "cd", "cp", "mv", "rm", "mkdir", "export", "source", "chmod",
+            "npm", "npx", "yarn", "pnpm", "bun", "node",
+            "pip", "pip3", "python", "python3", "poetry", "pytest", "pytest-3", "uvicorn", "flask",
+            "cargo", "rustc", "go", "make", "docker", "docker-compose",
+            "curl", "wget", "cat", "echo", "sed", "awk", "grep", "find", "brew", "apt", "sudo"
+        }
+
         try:
             content = readme_path.read_text(errors="ignore")
-            # Match ```bash ... ``` or ```sh ... ``` or ```shell ... ```
-            pattern = re.compile(r'```(?:bash|sh|shell|zsh)?\n(.*?)```', re.DOTALL)
+            # Only match explicit shell/terminal code blocks
+            pattern = re.compile(r'```(?:bash|sh|shell|zsh|console)?\n(.*?)```', re.DOTALL | re.IGNORECASE)
             for block in pattern.findall(content):
                 for line in block.splitlines():
                     cleaned = line.strip()
+                    if not cleaned or cleaned.startswith("#"):
+                        continue
+
                     # Strip leading '$ ' prompt symbol if present
+                    is_prompt = False
                     if cleaned.startswith("$ "):
                         cleaned = cleaned[2:].strip()
-                    if cleaned and not cleaned.startswith("#"):
+                        is_prompt = True
+
+                    first_token = cleaned.split()[0].lower() if cleaned.split() else ""
+                    # Remove flags or ./
+                    if first_token.startswith("./"):
                         commands.append({"raw": line, "command": cleaned})
+                    elif is_prompt or first_token in KNOWN_COMMAND_PREFIXES or "=" in first_token:
+                        # Exclude lines that end like full English sentences
+                        if not (cleaned.endswith(".") and len(cleaned.split()) > 6 and first_token not in KNOWN_COMMAND_PREFIXES):
+                            commands.append({"raw": line, "command": cleaned})
         except Exception:
             pass
         return commands
