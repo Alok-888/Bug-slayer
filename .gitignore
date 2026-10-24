@@ -8,6 +8,14 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg-info/
+build/
+dist/
+
+# Test outputs
+VERIFIED_README.md
+setup.sh
+
 
 # System & IDE files
 .DS_Store

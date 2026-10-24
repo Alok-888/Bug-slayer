@@ -49,30 +49,43 @@ It features a **Dual-Engine Architecture**:
 
 ## 🚀 Quickstart
 
-### Prerequisites
-- Python 3.10+
-- (Optional) `GEMINI_API_KEY` for cloud Gemma models (has built-in offline heuristic fallback)
-
-### Installation
+### ⚡ 1-Line Global Installation (Recommended)
+Install Bug Slayer directly from GitHub with pip:
 ```bash
+pip install git+https://github.com/chauhanalok546-rgb/Bug-slayer.git
+```
+
+### 💻 Usage
+Run Bug Slayer from **any folder on your computer**:
+
+```bash
+# 🌐 Pass any public GitHub URL directly:
+bugslayer https://github.com/elieh999/readme-clt.git
+
+# 📂 Or point to any local project folder:
+bugslayer /path/to/any/project
+```
+
+When run on a remote repository, Bug Slayer:
+1. Clones the code into an isolated sandbox.
+2. Identifies dependencies, environment variables, and entry points.
+3. Tests each setup step and diagnoses errors using **Gemma AI**.
+4. Automatically exports a verified **`VERIFIED_README.md`** and **`setup.sh`** into your current directory!
+
+---
+
+### 🧪 Try the Built-In Demos Locally:
+```bash
+# Clone the repository locally:
 git clone https://github.com/chauhanalok546-rgb/Bug-slayer.git
 cd Bug-slayer
-python3 -m pip install -r requirements.txt
-```
+pip install -e .
 
-### Usage
-Run Bug Slayer on any repository:
-```bash
-python3 run_bugslayer.py <path-to-repo>
-```
-
-#### Try the Interactive Demos:
-```bash
 # 1. Test Mode 1 (Heals a broken README instruction live)
-python3 run_bugslayer.py demo_broken_repo
+bugslayer demo_broken_repo
 
 # 2. Test Mode 2 (Synthesizes documentation from zero for an undocumented project)
-python3 run_bugslayer.py demo_undocumented_repo
+bugslayer demo_undocumented_repo
 
 # 3. Reset the demo environments anytime
 python3 reset_demos.py
