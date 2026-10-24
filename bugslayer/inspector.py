@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
+from bugslayer.safety import is_safe_to_read, safe_read_text
+
 
 class CodebaseInspector:
     def __init__(self, target_dir: str):
@@ -70,11 +72,11 @@ class CodebaseInspector:
                 facts["package_manager"] = "npm"
 
             try:
-                with open(pkg_json, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    facts["scripts"] = data.get("scripts", {})
-                    if "main" in data:
-                        facts["entry_points"].append(data["main"])
+                data = json.loads(safe_read_text(pkg_json, self.target_dir) or "{}")
+                scripts = data.get("scripts", {})
+                facts["scripts"] = scripts if isinstance(scripts, dict) else {}
+                if isinstance(data.get("main"), str):
+                    facts["entry_points"].append(data["main"])
             except Exception:
                 pass
 
@@ -88,7 +90,7 @@ class CodebaseInspector:
             facts["languages"].append("Python")
             if pyproject.exists():
                 facts["manifest_files"].append("pyproject.toml")
-                facts["package_manager"] = "poetry" if "poetry" in pyproject.read_text(errors="ignore") else "pip"
+                facts["package_manager"] = "poetry" if "poetry" in safe_read_text(pyproject, self.target_dir) else "pip"
             if req_txt.exists():
                 facts["manifest_files"].append("requirements.txt")
                 facts["package_manager"] = facts["package_manager"] or "pip"
@@ -130,7 +132,7 @@ class CodebaseInspector:
         for env_sample in [".env.example", ".env.sample", "sample.env"]:
             sample_file = self.target_dir / env_sample
             if sample_file.exists():
-                for line in sample_file.read_text(errors="ignore").splitlines():
+                for line in safe_read_text(sample_file, self.target_dir).splitlines():
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         var_name = line.split("=")[0].strip()
@@ -148,7 +150,7 @@ class CodebaseInspector:
                 if file.endswith((".py", ".js", ".ts", ".jsx", ".tsx")):
                     file_path = Path(root) / file
                     try:
-                        content = file_path.read_text(errors="ignore")
+                        content = safe_read_text(file_path, self.target_dir)
                         for match in py_pattern.findall(content):
                             env_vars.add(match)
                         for match in js_pattern.findall(content):
@@ -175,7 +177,7 @@ class CodebaseInspector:
         }
 
         try:
-            content = readme_path.read_text(errors="ignore")
+            content = safe_read_text(readme_path, self.target_dir)
             for line_no, line in self._shell_block_lines(content):
                 cleaned = line.strip()
                 if not cleaned or cleaned.startswith("#"):

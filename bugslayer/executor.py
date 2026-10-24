@@ -41,6 +41,21 @@ SERVER_PATTERN = re.compile(
 
 PWD_MARKER = "__BUGSLAYER_PWD__"
 
+# A server whose process is still alive can still be broken: auto-reload
+# watchers (uvicorn --reload, nodemon, flask --debug) keep running after the
+# app itself crashes. These messages mean the app did NOT start.
+SERVER_CRASH_PATTERN = re.compile(
+    r"Traceback \(most recent call last\)"
+    r"|Error loading ASGI app|Could not import module"
+    r"|ModuleNotFoundError|ImportError:|SyntaxError:"
+    r"|Cannot find module|ERR_MODULE_NOT_FOUND|EADDRINUSE|Address already in use"
+    r"|\[nodemon\] app crashed|UnhandledPromiseRejection",
+)
+
+
+def _crashed(log_text: str) -> bool:
+    return bool(SERVER_CRASH_PATTERN.search(log_text or ""))
+
 # Makes installers non-interactive so a step can never hang waiting for input.
 NONINTERACTIVE_ENV = {
     "CI": "1",
@@ -264,6 +279,8 @@ class CommandExecutor:
             # Still running: it booted. Stop it so the next step starts clean.
             self._docker_exec(["bash", "-c", f'kill -TERM -- -$(cat {pid_file}) 2>/dev/null; sleep 0.5; '
                                              f'kill -KILL -- -$(cat {pid_file}) 2>/dev/null; true'], timeout=30)
+            if _crashed(output):
+                return _result(False, 1, "", "The process kept running, but the app crashed:\n" + output)
             return _result(True, 0, "Server started successfully and remained active.\n" + output[-1500:])
         code = int(rc_text) if rc_text.lstrip("-").isdigit() else 1
         return _result(code == 0, code, output if code == 0 else "", "" if code == 0 else output)
@@ -347,7 +364,10 @@ class CommandExecutor:
                 except Exception:
                     pass
             log.seek(0)
-            return _result(True, 0, "Server started successfully and remained active.\n" + log.read()[-1500:])
+            output = log.read()[-4000:]
+            if _crashed(output):
+                return _result(False, 1, "", "The process kept running, but the app crashed:\n" + output)
+            return _result(True, 0, "Server started successfully and remained active.\n" + output[-1500:])
         log.seek(0)
         output = log.read()[-4000:]
         return _result(code == 0, code, output if code == 0 else "", "" if code == 0 else output)

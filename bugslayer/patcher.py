@@ -8,6 +8,8 @@ import difflib
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
+from bugslayer.safety import is_safe_to_read, safe_write_text
+
 
 class DocumentationPatcher:
     @staticmethod
@@ -22,7 +24,7 @@ class DocumentationPatcher:
         example in a Windows section) is left alone.
         """
         path = Path(readme_path)
-        if not path.exists():
+        if not path.exists() or path.is_symlink() or not is_safe_to_read(path):
             return False, ""
 
         original_text = path.read_text(encoding="utf-8", errors="ignore")
@@ -48,7 +50,7 @@ class DocumentationPatcher:
         ))
 
         # Write the patched file
-        path.write_text(patched_text, encoding="utf-8")
+        safe_write_text(path, patched_text)
 
         return True, "".join(diff)
 
@@ -130,6 +132,6 @@ class DocumentationPatcher:
 
         content = "\n".join(lines)
         readme_file = Path(target_dir) / "README.md"
-        readme_file.write_text(content, encoding="utf-8")
+        safe_write_text(readme_file, content, root=target_dir)
 
         return content
