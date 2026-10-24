@@ -50,9 +50,13 @@ It features a **Dual-Engine Architecture**:
 ## 🚀 Quickstart
 
 ### ⚡ 1-Line Global Installation (Recommended)
-Install Bug Slayer directly from GitHub with pip:
+Install Bug Slayer directly from GitHub:
 ```bash
-pip install git+https://github.com/chauhanalok546-rgb/Bug-slayer.git
+# macOS / Linux:
+python3 -m pip install git+https://github.com/chauhanalok546-rgb/Bug-slayer.git
+
+# Windows:
+python -m pip install git+https://github.com/chauhanalok546-rgb/Bug-slayer.git
 ```
 
 ### 💻 Usage
@@ -65,6 +69,8 @@ bugslayer https://github.com/elieh999/readme-clt.git
 # 📂 Or point to any local project folder:
 bugslayer /path/to/any/project
 ```
+
+*(💡 Tip: If your terminal doesn't have Python scripts in PATH, you can also run it via: `python3 -m bugslayer.cli <url-or-path>`)*
 
 When run on a remote repository, Bug Slayer:
 1. Clones the code into an isolated sandbox.
@@ -79,7 +85,7 @@ When run on a remote repository, Bug Slayer:
 # Clone the repository locally:
 git clone https://github.com/chauhanalok546-rgb/Bug-slayer.git
 cd Bug-slayer
-pip install -e .
+python3 -m pip install -e .
 
 # 1. Test Mode 1 (Heals a broken README instruction live)
 bugslayer demo_broken_repo
