@@ -1,2 +1,2 @@
 # Bug-slayer
-Bug slayer is an AI-powered tool that automatically tests setup instructions in README files within an isolated environment, detects missing dependencies and incorrect commands, and suggests verified fixes to make open-source projects easier to set up and contribute to.
+Bug Slayer is an autonomous developer tool that scans any repository, reverse-engineers the build/install/run requirements, verifies the commands by running them, and outputs a battle-tested setup guide or heals an existing broken README.
