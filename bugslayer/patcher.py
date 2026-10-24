@@ -1,12 +1,12 @@
 """
 Bug Slayer - Documentation Patcher & Generator
 Surgically updates existing READMEs, generates git diffs, and synthesizes
-brand-new verified documentation.
+brand-new verified documentation with configuration tables, endpoints, and container runtimes.
 """
 
 import difflib
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 
 class DocumentationPatcher:
@@ -57,76 +57,156 @@ class DocumentationPatcher:
         """Generates a complete, beautiful README.md from an AI setup plan."""
         title = plan.get("project_title", "Project Documentation")
         desc = plan.get("description", "A modern project setup.")
+        framework = plan.get("framework")
         prereqs = plan.get("prerequisites", [])
         env_cmd = plan.get("env_setup")
         install_cmds = plan.get("install_commands", [])
         run_cmd = plan.get("run_command", "")
+        docker_cmd = plan.get("docker_command")
+        service_url = plan.get("service_url")
+        api_docs_url = plan.get("api_docs_url")
         test_cmd = plan.get("test_command")
+        env_details = plan.get("env_details", [])
 
         lines = [
             f"# {title}",
             "",
-            "> 🛡️ *Setup instructions verified by [Bug Slayer](https://github.com/chauhanalok546-rgb/Bug-slayer).* ",
+            "> 🛡️ *Setup instructions synthesized and verified by [Bug Slayer](https://github.com/chauhanalok546-rgb/Bug-slayer).* ",
             "",
             desc,
             "",
-            "## 📋 Prerequisites",
-            ""
         ]
 
+        if framework and framework != "Generic":
+            lines.extend([
+                f"**Architecture & Framework:** `{framework}`",
+                "",
+            ])
+
+        # Prerequisites
+        lines.extend([
+            "## 📋 Prerequisites",
+            "",
+        ])
         if prereqs:
             for p in prereqs:
                 lines.append(f"- {p}")
         else:
             lines.append("- Standard developer tools")
+        lines.append("")
 
-        lines.extend(["", "## 🚀 Quickstart Guide", ""])
-
-        if env_cmd:
+        # Environment Configuration
+        if env_details:
             lines.extend([
-                "### 1. Configure Environment",
+                "## ⚙️ Configuration & Environment",
+                "",
+            ])
+            if env_cmd and not env_cmd.startswith("#"):
+                lines.extend([
+                    "Create your local environment configuration file:",
+                    "```bash",
+                    env_cmd,
+                    "```",
+                    "",
+                ])
+
+            lines.extend([
+                "| Variable | Default / Example | Purpose |",
+                "|:---|:---|:---|",
+            ])
+            for item in env_details:
+                name = item.get("name", "")
+                default = item.get("default", "(none)")
+                description = item.get("description", "Configuration setting")
+                lines.append(f"| `{name}` | `{default}` | {description} |")
+            lines.append("")
+
+        # Quickstart Guide
+        lines.extend([
+            "## 🚀 Quickstart Guide",
+            "",
+            "### 💻 Option A: Local Setup",
+            "",
+        ])
+
+        step_num = 1
+        if env_cmd and not env_details:
+            lines.extend([
+                f"#### {step_num}. Configure Environment",
                 "```bash",
                 env_cmd,
                 "```",
-                ""
+                "",
             ])
+            step_num += 1
 
-        step_num = 2 if env_cmd else 1
         if install_cmds:
             lines.extend([
-                f"### {step_num}. Install Dependencies",
+                f"#### {step_num}. Install Dependencies",
                 "```bash",
                 "\n".join(install_cmds),
                 "```",
-                ""
+                "",
             ])
             step_num += 1
 
         if run_cmd:
             lines.extend([
-                f"### {step_num}. Run the Application",
+                f"#### {step_num}. Run the Application",
                 "```bash",
                 run_cmd,
                 "```",
-                ""
+                "",
             ])
             step_num += 1
 
         if test_cmd:
             lines.extend([
-                f"### {step_num}. Run Tests",
+                f"#### {step_num}. Run Tests",
                 "```bash",
                 test_cmd,
                 "```",
-                ""
+                "",
             ])
 
+        # Docker Quickstart Option
+        if docker_cmd:
+            lines.extend([
+                "### 🐳 Option B: Docker Quickstart",
+                "",
+                "Run the complete application inside isolated containers:",
+                "```bash",
+                docker_cmd,
+                "```",
+                "",
+            ])
+
+        # Endpoints
+        if service_url or api_docs_url:
+            lines.extend([
+                "## 🌐 Endpoints & Access",
+                "",
+                "Once the service is started:",
+            ])
+            if service_url:
+                lines.append(f"- **Service URL:** [{service_url}]({service_url})")
+            if api_docs_url:
+                lines.append(f"- **Interactive API Documentation:** [{api_docs_url}]({api_docs_url})")
+            lines.append("")
+
+        # Windows notice
         all_cmds = [c for c in [env_cmd, *install_cmds, run_cmd, test_cmd] if c]
         if any(str(c).startswith(("python3 ", "pip3 ")) for c in all_cmds):
             lines.extend([
                 "> 🪟 **Windows users:** type `python` instead of `python3`.",
                 "",
             ])
+
+        # 1-Click Installer
+        lines.extend([
+            "> ⚡ **1-Click Installer:** A pre-verified installer `setup.sh` is generated in this repository for zero-effort onboarding.",
+            "",
+        ])
 
         content = "\n".join(lines)
         readme_file = Path(target_dir) / "README.md"

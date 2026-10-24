@@ -16,6 +16,7 @@ whether the AI was really used.
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -229,22 +230,31 @@ Commands will be tested on: {self.environment}
 Facts about the repository: {json.dumps(safe_facts)}
 
 Generate the exact setup and run commands a beginner needs.
-Use reliable commands such as `python3 -m pip install -r requirements.txt` rather than bare `pip`.
+Rules:
+- Use reliable commands such as `python3 -m pip install -r requirements.txt` rather than bare `pip`.
+- If a modern framework is detected (e.g. FastAPI, Next.js, Express, Flask), tailor run_command and endpoints to it.
+- If Dockerfile or docker-compose is present, provide a docker_command option.
+- Identify the local service URL and API docs URL (if FastAPI or Swagger).
 
 Reply with only a JSON object, no markdown:
 {{
   "project_title": "Clean Project Title",
-  "description": "Short 1-sentence description based on language and files.",
-  "prerequisites": ["tools needed, e.g. Python 3.10+, Node.js 18+"],
+  "description": "Short 1-2 sentence description based on language, frameworks, and architecture.",
+  "framework": "FastAPI | Flask | Django | Next.js | Express | Generic",
+  "prerequisites": ["tools needed, e.g. Python 3.10+, Docker (optional)"],
   "env_setup": "command to create the .env file if needed, or null",
   "install_commands": ["commands to install dependencies"],
-  "run_command": "command to start or run the project",
+  "run_command": "command to start or run the project locally",
+  "docker_command": "docker compose up --build -d (or null if no Dockerfile/compose)",
+  "service_url": "http://localhost:PORT (or null)",
+  "api_docs_url": "http://localhost:PORT/docs (or null)",
   "test_command": "command to run tests if tests exist, else null"
 }}"""
             try:
                 result = self._ask_json(prompt, "install_commands")
                 result.setdefault("install_commands", [])
                 result["source"] = self.last_model
+                result["env_details"] = facts.get("env_details", [])
                 return result
             except Exception as e:
                 self.last_error = str(e)[:200]
@@ -328,33 +338,79 @@ Reply with only a JSON object, no markdown:
     def _heuristic_generate(self, facts: Dict[str, Any]) -> Dict[str, Any]:
         """Deterministic fallback generator for zero-doc repositories."""
         languages = facts.get("languages", []) or ["Unknown"]
+        frameworks = facts.get("frameworks", [])
         manifests = facts.get("manifest_files", [])
         entry_points = facts.get("entry_points", [])
         scripts = facts.get("scripts", {})
+        ports = facts.get("ports", [])
+        primary_port = facts.get("primary_port")
 
+        framework_label = frameworks[0] if frameworks else "Generic"
         plan = {
-            "project_title": "Project Overview",
-            "description": f"A {', '.join(languages)} project.",
+            "project_title": f"{framework_label} Service" if framework_label != "Generic" else "Project Overview",
+            "description": f"A high-performance {', '.join(frameworks + languages)} project.",
+            "framework": framework_label,
             "prerequisites": [],
             "env_setup": None,
             "install_commands": [],
             "run_command": "echo 'No run command detected'",
+            "docker_command": None,
+            "service_url": f"http://localhost:{primary_port}" if primary_port else None,
+            "api_docs_url": f"http://localhost:{primary_port}/docs" if (primary_port and "FastAPI" in frameworks) else None,
             "test_command": None,
+            "env_details": facts.get("env_details", []),
         }
 
-        if facts.get("env_variables"):
-            has_example = os.path.exists(os.path.join(facts.get("path", ""), ".env.example"))
+        # Docker & Compose support
+        if facts.get("docker_compose"):
+            plan["docker_command"] = "docker compose up -d"
+            plan["prerequisites"].append("Docker & Docker Compose (optional container runtime)")
+        elif facts.get("has_dockerfile"):
+            plan["docker_command"] = "docker build -t app . && docker run -p 8000:8000 app"
+            plan["prerequisites"].append("Docker (optional container runtime)")
+
+        # Environment setup
+        if facts.get("env_variables") or facts.get("env_details"):
+            has_example = any((Path(facts.get("path", "")) / f).exists() for f in [".env.example", ".env.sample", "sample.env"])
             plan["env_setup"] = "cp .env.example .env" if has_example else "# Configure required environment variables"
 
+        # Python ecosystem
         if "Python" in languages:
             plan["prerequisites"].append("Python 3.10+ and pip")
-            if "requirements.txt" in manifests:
+            if any("requirements.txt" in m for m in manifests):
                 plan["install_commands"].append("python3 -m pip install -r requirements.txt")
-            elif "pyproject.toml" in manifests:
+            elif any("pyproject.toml" in m for m in manifests):
                 plan["install_commands"].append("python3 -m pip install .")
-            if entry_points:
+
+            # Framework-specific run commands
+            if "FastAPI" in frameworks:
+                ep_file = "main"
+                for ep in entry_points:
+                    if ep.endswith(".py"):
+                        ep_file = Path(ep).stem
+                        break
+                port_flag = f" --port {primary_port}" if primary_port else " --port 8000"
+                plan["run_command"] = f"python3 -m uvicorn {ep_file}:app --reload{port_flag}"
+                plan["service_url"] = f"http://localhost:{primary_port or 8000}"
+                plan["api_docs_url"] = f"http://localhost:{primary_port or 8000}/docs"
+            elif "Flask" in frameworks:
+                plan["run_command"] = f"python3 {entry_points[0]}" if entry_points else "python3 -m flask run"
+                plan["service_url"] = f"http://localhost:{primary_port or 5000}"
+            elif "Django" in frameworks:
+                plan["run_command"] = "python3 manage.py runserver"
+                plan["service_url"] = f"http://localhost:{primary_port or 8000}"
+            elif "Streamlit" in frameworks:
+                ep = entry_points[0] if entry_points else "app.py"
+                plan["run_command"] = f"python3 -m streamlit run {ep}"
+                plan["service_url"] = f"http://localhost:{primary_port or 8501}"
+            elif entry_points:
                 plan["run_command"] = f"python3 {entry_points[0]}"
 
+            # Test command
+            if any("test" in ep or "tests" in ep for ep in entry_points) or (Path(facts.get("path", "")) / "tests").exists():
+                plan["test_command"] = "pytest"
+
+        # JavaScript/TypeScript ecosystem
         if "JavaScript/TypeScript" in languages:
             plan["prerequisites"].append("Node.js 18+ and npm")
             pkg_mgr = facts.get("package_manager") or "npm"
@@ -367,5 +423,8 @@ Reply with only a JSON object, no markdown:
                 plan["run_command"] = f"{pkg_mgr} start"
             elif entry_points:
                 plan["run_command"] = f"node {entry_points[0]}"
+
+            if "test" in scripts:
+                plan["test_command"] = f"{pkg_mgr} test"
 
         return plan

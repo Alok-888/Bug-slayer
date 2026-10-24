@@ -218,10 +218,21 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
         table.add_column("Discovered Fact", style="white")
         table.add_row("Repository", target if is_remote else str(target_path))
         table.add_row("Languages", ", ".join(facts["languages"]) if facts["languages"] else "Unknown")
+        if facts.get("frameworks"):
+            table.add_row("Frameworks", ", ".join(facts["frameworks"]))
         table.add_row("Package Manager", facts["package_manager"] or "None detected")
         table.add_row("Manifests", ", ".join(facts["manifest_files"]) if facts["manifest_files"] else "None")
         table.add_row("Entry Points", ", ".join(facts["entry_points"]) if facts["entry_points"] else "None")
+        if facts.get("ports"):
+            table.add_row("Detected Ports", ", ".join(str(p) for p in facts["ports"]))
+        if facts.get("docker_compose"):
+            services_info = f" ({', '.join(facts['docker_services'])})" if facts.get("docker_services") else ""
+            table.add_row("Containers", f"Docker Compose [{facts['docker_compose']}]{services_info}")
+        elif facts.get("has_dockerfile"):
+            table.add_row("Containers", "Dockerfile detected")
         table.add_row("Env Variables", ", ".join(facts["env_variables"]) if facts["env_variables"] else "None detected")
+        if facts.get("files_scanned", 0) > 0:
+            table.add_row("Repo Scale", f"{facts['files_scanned']} files scanned in {facts.get('scan_duration_ms', 0)}ms")
         table.add_row("README Status", f"[green]Found ({len(facts['readme_commands'])} commands)[/green]" if facts["has_readme"] else "[red]Missing or empty[/red]")
         table.add_row("Runs In", f"[green]{executor.describe()}[/green]" if mode == "docker" else f"[yellow]{executor.describe()}[/yellow]")
         table.add_row("AI Engine", f"[green]{engine.model_label}[/green]" if engine.is_online else f"[yellow]{engine.model_label}[/yellow]")
@@ -340,11 +351,25 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
             if plan.get("source") == OFFLINE_SOURCE and engine.last_error:
                 console.print(f"[yellow]⚠ AI unavailable ({engine.last_error}). Using offline rules.[/yellow]")
 
-            console.print(Panel(
-                f"[bold cyan]Title:[/bold cyan] {plan.get('project_title')}\n"
-                f"[bold cyan]Prerequisites:[/bold cyan] {', '.join(plan.get('prerequisites') or [])}\n"
-                f"[bold cyan]Install:[/bold cyan] {', '.join(plan.get('install_commands') or [])}\n"
+            blueprint_lines = [
+                f"[bold cyan]Title:[/bold cyan] {plan.get('project_title')}",
+            ]
+            if plan.get("framework") and plan.get("framework") != "Generic":
+                blueprint_lines.append(f"[bold cyan]Framework:[/bold cyan] {plan.get('framework')}")
+            blueprint_lines.extend([
+                f"[bold cyan]Prerequisites:[/bold cyan] {', '.join(plan.get('prerequisites') or [])}",
+                f"[bold cyan]Install:[/bold cyan] {', '.join(plan.get('install_commands') or [])}",
                 f"[bold cyan]Run Command:[/bold cyan] {plan.get('run_command')}",
+            ])
+            if plan.get("docker_command"):
+                blueprint_lines.append(f"[bold cyan]Docker Quickstart:[/bold cyan] {plan.get('docker_command')}")
+            if plan.get("service_url"):
+                blueprint_lines.append(f"[bold cyan]Service URL:[/bold cyan] {plan.get('service_url')}")
+            if plan.get("api_docs_url"):
+                blueprint_lines.append(f"[bold cyan]API Docs:[/bold cyan] {plan.get('api_docs_url')}")
+
+            console.print(Panel(
+                "\n".join(blueprint_lines),
                 title=f"[cyan]Synthesized Blueprint (by {plan.get('source', 'unknown')})[/cyan]",
                 border_style="cyan",
             ))
