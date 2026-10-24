@@ -67,11 +67,12 @@ class CodebaseInspector:
         self._detect_manifests(facts)
         self._detect_containers(facts)
 
-        # 3. Detect Frameworks (FastAPI, Next.js, Flask, Django, etc.)
-        self._detect_frameworks(facts)
-
-        # 4. Detect Entry Points (root and key subdirectories)
+        # 3. Detect Entry Points (root and key subdirectories)
         self._detect_entry_points(facts)
+
+        # 4. Detect Frameworks (FastAPI, Next.js, Flask, Django, etc.); after the
+        #    entry points, so their imports can be checked too
+        self._detect_frameworks(facts)
 
         # 5. Harvest Environment Variables (bounded scan)
         self._harvest_env(facts)
@@ -188,36 +189,55 @@ class CodebaseInspector:
                     pass
                 break
 
+    # Dependency name -> framework. Matched against real package names, not any
+    # text in the file (plain text search found "vite" in "invite", "next" in
+    # "next generation").
+    FRAMEWORK_PACKAGES = {
+        "fastapi": "FastAPI", "flask": "Flask", "django": "Django", "streamlit": "Streamlit",
+        "tornado": "Tornado", "next": "Next.js", "express": "Express", "@nestjs/core": "NestJS",
+        "vite": "Vite",
+    }
+
+    def _dependency_names(self, mf_path: Path) -> Set[str]:
+        """Package names listed in a requirements.txt, pyproject.toml, Pipfile or package.json."""
+        text = safe_read_text(mf_path, self.target_dir)
+        names: Set[str] = set()
+        if mf_path.name == "package.json":
+            try:
+                data = json.loads(text or "{}")
+                for key in ("dependencies", "devDependencies", "peerDependencies"):
+                    deps = data.get(key)
+                    if isinstance(deps, dict):
+                        names.update(str(k).lower() for k in deps)
+            except Exception:
+                pass
+            return names
+        if mf_path.name == "requirements.txt":
+            for line in text.splitlines():
+                m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+                if m and not line.lstrip().startswith(("#", "-")):
+                    names.add(m.group(1).lower())
+            return names
+        # pyproject.toml / Pipfile: quoted or bare names followed by a version marker,
+        # e.g. "fastapi>=0.110", fastapi = "^0.110", django = "*"
+        for m in re.finditer(r'(?m)(?:^|["\'\s])([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:[<>=!~^]|=\s*["\'{])', text):
+            names.add(m.group(1).lower())
+        return names
+
     def _detect_frameworks(self, facts: Dict[str, Any]):
-        """Identifies specific modern frameworks from dependencies or manifest contents."""
+        """Identifies specific modern frameworks from dependencies and entry-file imports."""
         frameworks: Set[str] = set()
 
-        # Check Python requirements / pyproject
         for mf in facts["manifest_files"]:
             mf_path = self.target_dir / mf
             if not mf_path.exists():
                 continue
-            text = safe_read_text(mf_path, self.target_dir).lower()
-            if "fastapi" in text:
-                frameworks.add("FastAPI")
-            if "flask" in text:
-                frameworks.add("Flask")
-            if "django" in text:
-                frameworks.add("Django")
-            if "streamlit" in text:
-                frameworks.add("Streamlit")
-            if "tornado" in text:
-                frameworks.add("Tornado")
-            if "next" in text:
-                frameworks.add("Next.js")
-            if "express" in text:
-                frameworks.add("Express")
-            if "nestjs" in text or "@nestjs" in text:
-                frameworks.add("NestJS")
-            if "vite" in text:
-                frameworks.add("Vite")
+            names = self._dependency_names(mf_path)
+            for package, framework in self.FRAMEWORK_PACKAGES.items():
+                if package in names:
+                    frameworks.add(framework)
 
-        # Check top-level entry files for import signatures if still empty
+        # Check entry files for import signatures
         for ep in facts["entry_points"][:3]:
             ep_path = self.target_dir / ep
             if ep_path.exists():
@@ -278,6 +298,8 @@ class CodebaseInspector:
 
                     # Strip enclosing quotes
                     default_val = default_val.strip("\"'")
+                    # Never copy secret-looking values into the README or the AI prompt
+                    default_val = self._redact_env_value(var_name, default_val)
                     if var_name:
                         env_vars.add(var_name)
                         env_details.append({
@@ -339,6 +361,20 @@ class CodebaseInspector:
         facts["env_variables"] = cleaned_env
         facts["env_details"] = env_details
         facts["files_scanned"] = total_files
+
+    SECRET_NAME = re.compile(r"SECRET|PASSWORD|PASSWD|PASS(?:$|_)|TOKEN|(?:^|_)KEY(?:$|_)|APIKEY|PRIVATE|CREDENTIAL|AUTH", re.IGNORECASE)
+
+    @classmethod
+    def _redact_env_value(cls, var_name: str, value: str) -> str:
+        """
+        Example values for secrets are replaced by a placeholder, and passwords
+        inside connection URLs (scheme://user:password@host) are masked.
+        """
+        if not value:
+            return value
+        if cls.SECRET_NAME.search(var_name):
+            return "<your value>"
+        return re.sub(r"(://[^:/@\s]+:)[^@\s]+@", r"\1****@", value)
 
     def _infer_env_description(self, var_name: str) -> str:
         """Infers a clean description for an environment variable name."""

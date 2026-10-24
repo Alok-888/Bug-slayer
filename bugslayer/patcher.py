@@ -116,10 +116,14 @@ class DocumentationPatcher:
                 "| Variable | Default / Example | Purpose |",
                 "|:---|:---|:---|",
             ])
+            def cell(text) -> str:
+                # A | or ` in a value would break the Markdown table
+                return str(text).replace("\\", "\\\\").replace("|", "\\|").replace("`", "'").replace("\n", " ")
+
             for item in env_details:
-                name = item.get("name", "")
-                default = item.get("default", "(none)")
-                description = item.get("description", "Configuration setting")
+                name = cell(item.get("name", ""))
+                default = cell(item.get("default", "(none)"))
+                description = cell(item.get("description", "Configuration setting"))
                 lines.append(f"| `{name}` | `{default}` | {description} |")
             lines.append("")
 

@@ -16,6 +16,7 @@ whether the AI was really used.
 import json
 import os
 import sys
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -340,6 +341,24 @@ Reply with only a JSON object, no markdown:
             "root_cause_type": "UNKNOWN_ERROR",
         }
 
+    @staticmethod
+    def _find_fastapi_app(facts: Dict[str, Any]):
+        """
+        Returns (module, app variable, folder) for the first entry file that really
+        creates a FastAPI app, e.g. `app = FastAPI()`, or None if there is none.
+        """
+        from bugslayer.safety import safe_read_text
+        root = Path(facts.get("path", ""))
+        for ep in facts.get("entry_points", []):
+            if not str(ep).endswith(".py"):
+                continue
+            code = safe_read_text(root / ep, root)
+            m = re.search(r"(?m)^([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=\n]+)?=\s*(?:fastapi\.)?FastAPI\(", code)
+            if m:
+                folder = str(Path(ep).parent)
+                return Path(ep).stem, m.group(1), ("" if folder == "." else folder)
+        return None
+
     def _heuristic_generate(self, facts: Dict[str, Any]) -> Dict[str, Any]:
         """Deterministic fallback generator for zero-doc repositories."""
         languages = facts.get("languages", []) or ["Unknown"]
@@ -361,7 +380,7 @@ Reply with only a JSON object, no markdown:
             "run_command": "echo 'No run command detected'",
             "docker_command": None,
             "service_url": f"http://localhost:{primary_port}" if primary_port else None,
-            "api_docs_url": f"http://localhost:{primary_port}/docs" if (primary_port and "FastAPI" in frameworks) else None,
+            "api_docs_url": None,  # set below only when a real FastAPI app is found
             "test_command": None,
             "env_details": facts.get("env_details", []),
         }
@@ -371,33 +390,39 @@ Reply with only a JSON object, no markdown:
             plan["docker_command"] = "docker compose up -d"
             plan["prerequisites"].append("Docker & Docker Compose (optional container runtime)")
         elif facts.get("has_dockerfile"):
-            plan["docker_command"] = "docker build -t app . && docker run -p 8000:8000 app"
+            port = primary_port or 8000
+            plan["docker_command"] = f"docker build -t app . && docker run -p {port}:{port} app"
             plan["prerequisites"].append("Docker (optional container runtime)")
 
         # Environment setup
         if facts.get("env_variables") or facts.get("env_details"):
-            has_example = any((Path(facts.get("path", "")) / f).exists() for f in [".env.example", ".env.sample", "sample.env"])
-            plan["env_setup"] = "cp .env.example .env" if has_example else "# Configure required environment variables"
+            example = next((f for f in [".env.example", ".env.sample", "sample.env", ".env.template"]
+                            if (Path(facts.get("path", "")) / f).exists()), None)
+            plan["env_setup"] = f"cp {example} .env" if example else "# Configure required environment variables"
 
         # Python ecosystem
         if "Python" in languages:
             plan["prerequisites"].append("Python 3.10+ and pip")
-            if any("requirements.txt" in m for m in manifests):
-                plan["install_commands"].append("python3 -m pip install -r requirements.txt")
-            elif any("pyproject.toml" in m for m in manifests):
-                plan["install_commands"].append("python3 -m pip install .")
+            # Use the manifest's real location; the main folder's own file comes first
+            req = sorted((m for m in manifests if m.endswith("requirements.txt")), key=lambda m: m.count("/"))
+            proj = sorted((m for m in manifests if m.endswith("pyproject.toml")), key=lambda m: m.count("/"))
+            if req:
+                plan["install_commands"].append(f"python3 -m pip install -r {req[0]}")
+            elif proj:
+                folder = str(Path(proj[0]).parent)
+                plan["install_commands"].append("python3 -m pip install ." if folder == "." else f"python3 -m pip install ./{folder}")
 
             # Framework-specific run commands
-            if "FastAPI" in frameworks:
-                ep_file = "main"
-                for ep in entry_points:
-                    if ep.endswith(".py"):
-                        ep_file = Path(ep).stem
-                        break
-                port_flag = f" --port {primary_port}" if primary_port else " --port 8000"
-                plan["run_command"] = f"python3 -m uvicorn {ep_file}:app --reload{port_flag}"
-                plan["service_url"] = f"http://localhost:{primary_port or 8000}"
-                plan["api_docs_url"] = f"http://localhost:{primary_port or 8000}/docs"
+            fastapi_app = self._find_fastapi_app(facts) if "FastAPI" in frameworks else None
+            if fastapi_app:
+                # No --reload: its watcher process stays alive even when the app
+                # crashes, which would hide a broken command from verification.
+                module, variable, folder = fastapi_app
+                port = primary_port or 8000
+                app_dir = f" --app-dir {folder}" if folder else ""
+                plan["run_command"] = f"python3 -m uvicorn {module}:{variable}{app_dir} --port {port}"
+                plan["service_url"] = f"http://localhost:{port}"
+                plan["api_docs_url"] = f"http://localhost:{port}/docs"
             elif "Flask" in frameworks:
                 plan["run_command"] = f"python3 {entry_points[0]}" if entry_points else "python3 -m flask run"
                 plan["service_url"] = f"http://localhost:{primary_port or 5000}"
