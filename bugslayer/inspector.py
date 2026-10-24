@@ -8,7 +8,7 @@ import os
 import re
 import json
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 
 class CodebaseInspector:
@@ -156,6 +156,9 @@ class CodebaseInspector:
                     except Exception:
                         pass
 
+        ignored_prefixes = ("GITHUB_", "RUNNER_", "INPUT_", "ACTIONS_")
+        ignored = {"CI", "HOME", "PATH", "PWD", "USER", "SHELL", "TERM", "LANG", "TMPDIR", "NODE_ENV"}
+        env_vars = {v for v in env_vars if v not in ignored and not v.startswith(ignored_prefixes)}
         return sorted(list(env_vars))
 
     def _extract_readme_commands(self, readme_path: Path) -> List[Dict[str, Any]]:
@@ -166,33 +169,55 @@ class CodebaseInspector:
             "npm", "npx", "yarn", "pnpm", "bun", "node",
             "pip", "pip3", "python", "python3", "poetry", "pytest", "pytest-3", "uvicorn", "flask",
             "cargo", "rustc", "go", "make", "docker", "docker-compose",
-            "curl", "wget", "cat", "echo", "sed", "awk", "grep", "find", "brew", "apt", "sudo"
+            "curl", "wget", "cat", "echo", "sed", "awk", "grep", "find", "brew", "apt", "sudo",
+            "py", "uv", "pipx", "conda", "deno", "java", "mvn", "gradle", "dotnet",
+            "bundle", "gem", "composer", "php", "touch", "ls", "set", "rustup", "make"
         }
 
         try:
             content = readme_path.read_text(errors="ignore")
-            # Only match explicit shell/terminal code blocks
-            pattern = re.compile(r'```(?:bash|sh|shell|zsh|console)?\n(.*?)```', re.DOTALL | re.IGNORECASE)
-            for block in pattern.findall(content):
-                for line in block.splitlines():
-                    cleaned = line.strip()
-                    if not cleaned or cleaned.startswith("#"):
-                        continue
+            for line_no, line in self._shell_block_lines(content):
+                cleaned = line.strip()
+                if not cleaned or cleaned.startswith("#"):
+                    continue
 
-                    # Strip leading '$ ' prompt symbol if present
-                    is_prompt = False
-                    if cleaned.startswith("$ "):
-                        cleaned = cleaned[2:].strip()
-                        is_prompt = True
+                # Strip leading '$ ' / '> ' prompt symbols if present
+                is_prompt = False
+                if cleaned.startswith("$ ") or cleaned.startswith("> "):
+                    cleaned = cleaned[2:].strip()
+                    is_prompt = True
 
-                    first_token = cleaned.split()[0].lower() if cleaned.split() else ""
-                    # Remove flags or ./
-                    if first_token.startswith("./"):
-                        commands.append({"raw": line, "command": cleaned})
-                    elif is_prompt or first_token in KNOWN_COMMAND_PREFIXES or "=" in first_token:
-                        # Exclude lines that end like full English sentences
-                        if not (cleaned.endswith(".") and len(cleaned.split()) > 6 and first_token not in KNOWN_COMMAND_PREFIXES):
-                            commands.append({"raw": line, "command": cleaned})
+                first_token = cleaned.split()[0].lower() if cleaned.split() else ""
+                entry = {"raw": line, "command": cleaned, "line": line_no}
+                if first_token.startswith("./") or first_token.startswith(".\\"):
+                    commands.append(entry)
+                elif is_prompt or first_token in KNOWN_COMMAND_PREFIXES or "=" in first_token:
+                    # Exclude lines that end like full English sentences
+                    if not (cleaned.endswith(".") and len(cleaned.split()) > 6 and first_token not in KNOWN_COMMAND_PREFIXES):
+                        commands.append(entry)
         except Exception:
             pass
         return commands
+
+    @staticmethod
+    def _shell_block_lines(content: str) -> List[Tuple[int, str]]:
+        """
+        Walks the README line by line and returns (line_number, text) for lines
+        inside shell code blocks (```bash, ```sh, ```shell, ```zsh, ```console
+        or unlabeled ```). Tracking open/close fences explicitly prevents prose
+        between two code blocks from being mistaken for a command.
+        """
+        shell_langs = {"", "bash", "sh", "shell", "zsh", "console", "terminal"}
+        lines: List[Tuple[int, str]] = []
+        in_block, is_shell = False, False
+        for number, raw in enumerate(content.splitlines(), start=1):
+            fence = re.match(r"^\s*```\s*([\w+-]*)", raw)
+            if fence:
+                if not in_block:
+                    in_block, is_shell = True, fence.group(1).lower() in shell_langs
+                else:
+                    in_block = False
+                continue
+            if in_block and is_shell:
+                lines.append((number, raw))
+        return lines

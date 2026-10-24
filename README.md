@@ -61,6 +61,22 @@ python3 -m pip install git+https://github.com/chauhanalok546-rgb/Bug-slayer.git
 python -m pip install git+https://github.com/chauhanalok546-rgb/Bug-slayer.git
 ```
 
+### ✅ Before your first run
+1. **Docker Desktop (recommended):** install it from [docker.com](https://www.docker.com/products/docker-desktop/) and open it. Bug Slayer then tests every README step inside a throwaway Linux container, so nothing is installed or changed on your computer, and results are the same on macOS, Windows and Linux. The first run downloads a base image (about a minute).
+2. **Gemma AI key:** get a free key from [Google AI Studio](https://aistudio.google.com) and set it in your terminal:
+
+```bash
+# macOS / Linux
+export GEMINI_API_KEY="your_key_here"
+```
+
+```powershell
+# Windows PowerShell
+$env:GEMINI_API_KEY="your_key_here"
+```
+
+Without a key, Bug Slayer still works using built-in offline rules, and it tells you clearly that it did so.
+
 ---
 
 ## 💻 How to Use (Run From Anywhere)
@@ -79,10 +95,23 @@ bugslayer /path/to/any/project
 *(💡 **Note for all platforms:** If your terminal does not have Python script binaries linked in PATH, you can universally run it as: `python3 -m bugslayer.cli <url-or-path>` on Mac/Linux or `python -m bugslayer.cli <url-or-path>` on Windows)*.
 
 When run on a remote repository, Bug Slayer:
-1. Clones the code into an isolated sandbox.
+1. Downloads the code into a temporary folder.
 2. Identifies dependencies, environment variables, and entry points.
-3. Tests each setup step and diagnoses errors using **Gemma AI**.
-4. Automatically exports a verified **`VERIFIED_README.md`** and **`setup.sh`** into your current directory!
+3. Runs each setup step inside an isolated **Docker sandbox** (remembering `cd`, `export` and `source venv/bin/activate` between steps, like a real terminal).
+4. Diagnoses failures with **Gemma AI** (`gemma-4-26b-a4b-it`) and re-runs the suggested fix to prove it works.
+5. Patches only the broken line of the README. Differences that only affect one machine (such as `python` vs `python3`) are reported but never "fixed" in the README.
+6. Saves the results to **`bugslayer_output/<repo-name>/`**: `VERIFIED_README.md`, `fix-readme.patch` (ready for a pull request) and `setup.sh`.
+
+### ⚙️ Options
+| Option | What it does |
+|---|---|
+| *(none)* | Uses Docker if it is running; otherwise asks before running anything on your computer |
+| `--docker` | Requires the Docker sandbox; stops if Docker is not running |
+| `--local` | Runs the steps directly on this computer (not isolated; use only for repos you trust) |
+| `--model NAME` | Uses another model, e.g. `--model gemma-4-31b-it` |
+| `--output DIR` | Saves results of a remote run to `DIR` |
+
+Environment variables: `GEMINI_API_KEY` (AI key), `BUGSLAYER_MODEL`, `BUGSLAYER_IMAGE` (sandbox image), `BUGSLAYER_TIMEOUT` (seconds per step, default 300).
 
 ---
 
@@ -106,7 +135,7 @@ python3 reset_demos.py
 ---
 
 ## 🛠️ Tech Stack & Open-Source Tools
-- **Model:** Gemma (Google's open-weights family) / Gemini API
+- **Model:** Gemma 4 (`gemma-4-26b-a4b-it`, backup `gemma-4-31b-it`) via the Gemini API, with an offline rule-based fallback
 - **CLI & Visualization:** Rich (Terminal UI, AST diff rendering)
-- **Execution Harness:** Subprocess with timeout & daemon process group management
+- **Execution Harness:** Docker sandbox (copy of the repo, memory/CPU limits) with a cross-platform local fallback for macOS, Linux and Windows
 - **License:** MIT License

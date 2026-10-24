@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="bugslayer",
-    version="1.0.0",
+    version="1.1.0",
     description="Autonomous Setup & README Verifier for Open-Source Repositories",
     author="NST Hack Day Team",
     packages=find_packages(),
