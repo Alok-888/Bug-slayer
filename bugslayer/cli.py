@@ -266,6 +266,26 @@ def _choose_sandbox(requested: str) -> str:
     return ""
 
 
+def _approve_offline_fix(command: str) -> bool:
+    """
+    Local mode without the AI (no internet or no API key): the fix comes from
+    built-in rules and would run directly on this computer, so ask first.
+    When nobody can answer (no terminal), the fix is not run.
+    """
+    if sys.stdin is not None and sys.stdin.isatty():
+        try:
+            answer = console.input(f"[bold]The AI is not connected, so this fix comes from offline rules. "
+                                   f"Run `{_e(command)}` on this computer? \\[Y/n]: [/bold]")
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer.strip().lower() in ("", "y", "yes")
+    console.print("  [yellow]⚠ The AI is not connected, so this fix comes from offline rules, and "
+                  "nobody is here to approve running it on this computer.[/yellow]\n"
+                  "  [dim]Run Bug Slayer again in a terminal to approve it, connect the AI "
+                  "(GEMINI_API_KEY), or use Docker.[/dim]")
+    return False
+
+
 def _can_write_to(folder: Path) -> bool:
     """True if `folder` can be created and a file can be written inside it."""
     try:
@@ -547,6 +567,11 @@ def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: 
 
         if suggested_cmd == cmd:
             console.print("  [bold red]No different command to try. Manual fix needed - stopping here.[/bold red]\n")
+            failed += 1
+            break
+
+        if executor.mode == "local" and source == OFFLINE_SOURCE and not _approve_offline_fix(suggested_cmd):
+            console.print("  [yellow]The suggested fix was not run. Manual fix needed - stopping here.[/yellow]\n")
             failed += 1
             break
 

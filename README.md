@@ -107,7 +107,7 @@ When run on a remote repository, Bug Slayer:
 |---|---|
 | *(none)* | Uses Docker if it is running; otherwise asks before running anything on your computer |
 | `--docker` | Requires the Docker sandbox; stops if Docker is not running |
-| `--local` | Runs the steps directly on this computer (not isolated; use only for repos you trust) |
+| `--local` | Runs the steps directly on this computer (not isolated; use only for repos you trust). Without the AI (no internet or no API key), it asks before running a fix from the offline rules |
 | `--model NAME` | Uses another model, e.g. `--model gemma-4-31b-it` |
 | `--output DIR` | Saves results of a remote run to `DIR` |
 | `--readme PATH` | Checks only that README, e.g. `--readme backend/README.md` |
