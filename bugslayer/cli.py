@@ -9,6 +9,7 @@ Usage:
 import argparse
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -264,9 +265,91 @@ def _print_all_readmes_summary(facts, process_root: bool, root_result, extra_res
     console.print(table)
 
 
+# --------------------------------------------------------------------------- #
+# The README's own `git clone` step
+# --------------------------------------------------------------------------- #
+# Bug Slayer has already downloaded the repository, so a README step that
+# clones the SAME repository (often with a placeholder such as YOUR_USERNAME)
+# is skipped during the test run, together with the `cd` into that folder.
+# The step stays in setup.sh, with the placeholder replaced by the real URL.
+PLACEHOLDER = re.compile(
+    r"(?i:your[_-]?(?:user(?:name)?|github|name|org|account|handle))|USERNAME|<[^>]+>|\{[^}]+\}|\[[A-Za-z_ -]+\]"
+)
+CLONE_VALUE_OPTIONS = {"-b", "--branch", "--depth", "-o", "--origin", "-c", "--config", "-j", "--jobs",
+                       "--filter", "--reference", "--separate-git-dir", "--template", "-u", "--upload-pack"}
+
+
+def _repo_basename(url: str) -> str:
+    return re.sub(r"\.git$", "", url.rstrip("/").split("/")[-1].split(":")[-1])
+
+
+def _parse_clone(part: str):
+    """For a `git clone URL [DIR]` command, returns (url, folder); otherwise None."""
+    try:
+        words = shlex.split(part)
+    except ValueError:
+        return None
+    if len(words) < 3 or words[0] != "git" or words[1] != "clone":
+        return None
+    positional, i = [], 2
+    while i < len(words):
+        w = words[i]
+        if w in CLONE_VALUE_OPTIONS:
+            i += 2
+            continue
+        if not w.startswith("-"):
+            positional.append(w)
+        i += 1
+    if not positional:
+        return None
+    url = positional[0]
+    folder = positional[1] if len(positional) > 1 else _repo_basename(url)
+    return url, folder
+
+
+def _clones_this_repo(url: str, repo_name: str) -> bool:
+    return bool(PLACEHOLDER.search(url)) or (bool(repo_name) and _repo_basename(url).lower() == repo_name.lower())
+
+
+def _plan_clone_step(cmd: str, repo: dict, state: dict):
+    """
+    Decides what to do with a README step, given that the repository is
+    already downloaded. Returns (command_to_run or None, skip_reason, setup_command).
+    """
+    if not repo:
+        return cmd, "", cmd
+    parts = [p.strip() for p in re.split(r"\s*&&\s*", cmd)]
+    keep, setup_parts, reasons = [], [], []
+    for part in parts:
+        clone = _parse_clone(part)
+        if clone and _clones_this_repo(clone[0], repo.get("name", "")):
+            url, folder = clone
+            state.setdefault("cloned", set()).add(folder.rstrip("/"))
+            reasons.append("the repository is already downloaded")
+            real_url = repo.get("url") or url
+            setup_parts.append(f"git clone {shlex.quote(real_url)} {shlex.quote(folder)}" if PLACEHOLDER.search(url) and repo.get("url") else part)
+            continue
+        m = re.match(r"^cd\s+(\S+)$", part)
+        if m and state.get("cloned"):
+            target = m.group(1).strip("\"'").rstrip("/")
+            target = target[2:] if target.startswith("./") else target
+            first, _, rest = target.partition("/")
+            if first in state["cloned"]:
+                setup_parts.append(part)
+                if rest:
+                    keep.append(f"cd {rest}")
+                else:
+                    reasons.append(f"Bug Slayer is already inside {first}/")
+                continue
+        keep.append(part)
+        setup_parts.append(part)
+    run_cmd = " && ".join(keep) if keep else None
+    return run_cmd, "; ".join(dict.fromkeys(reasons)), " && ".join(setup_parts)
+
+
 def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: str,
                        display_name: str = "README.md", context: str = "",
-                       patch_paths: list = None) -> dict:
+                       patch_paths: list = None, repo: dict = None) -> dict:
     """
     Mode 1 for one README: runs its steps, diagnoses failures, verifies fixes
     and patches the README. Used for the main README and, unchanged, for each
@@ -274,22 +357,35 @@ def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: 
 
     patch_paths: README files whose changes go into fix-readme.patch
     (default: just this README).
+    repo: {"name": ..., "url": ...} of the repository being checked; used to
+    skip the README's own `git clone` of it (None: run every step as written).
     """
     verified_commands = []
     readme_changed = False
-    passed = failed = healed = 0
+    passed = failed = healed = skipped = 0
     patch_paths = patch_paths if patch_paths is not None else [facts["readme_path"]]
+    clone_state = {}
 
     for idx, cmd_info in enumerate(facts["readme_commands"], 1):
         cmd = cmd_info["command"]
+        run_cmd, skip_reason, setup_cmd = _plan_clone_step(cmd, repo, clone_state)
+        if run_cmd is None:
+            console.print(f"[bold cyan]⏭ Step {idx}:[/bold cyan] [white]`{_e(cmd)}`[/white]")
+            console.print(f"  [dim]Skipped: {_e(skip_reason)}. It stays in setup.sh.[/dim]\n")
+            verified_commands.append(setup_cmd)
+            skipped += 1
+            continue
         console.print(f"[bold cyan]▶ Step {idx}:[/bold cyan] [white]`{_e(cmd)}`[/white]")
+        if run_cmd != cmd:
+            console.print(f"  [dim]Running only `{_e(run_cmd)}` ({_e(skip_reason)}).[/dim]")
+            cmd = run_cmd
 
         with console.status(f"Running step {idx}...", spinner="bouncingBar"):
             res = executor.run(cmd)
 
         if res["success"]:
             console.print("  [bold green]✔ Passed cleanly[/bold green] (Exit code 0)\n")
-            verified_commands.append(cmd)
+            verified_commands.append(setup_cmd if setup_cmd != cmd_info["command"] else cmd)
             passed += 1
             continue
 
@@ -379,11 +475,13 @@ def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: 
 
     console.print(Panel(
         f"[green]✔ {passed} passed[/green]   [cyan]🛡️ {healed} healed[/cyan]   "
-        f"[red]✘ {failed} need a manual fix[/red]   of {len(facts['readme_commands'])} steps",
+        f"[red]✘ {failed} need a manual fix[/red]   "
+        + (f"[dim]⏭ {skipped} skipped[/dim]   " if skipped else "")
+        + f"of {len(facts['readme_commands'])} steps",
         title="[bold]Summary[/bold]", border_style="white",
     ))
     return {"verified_commands": verified_commands, "readme_changed": readme_changed,
-            "passed": passed, "healed": healed, "failed": failed,
+            "passed": passed, "healed": healed, "failed": failed, "skipped": skipped,
             "steps": len(facts["readme_commands"])}
 
 
@@ -509,12 +607,16 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
         if facts.get("readme_path"):
             readme_text = safe_read_text(facts["readme_path"], target_path)
 
+        # The repository being checked, so the README's own `git clone` of it can be skipped
+        repo_info = {"name": _repo_name(target) if is_remote else target_path.name,
+                     "url": target if is_remote else _origin_url(target_path)}
+
         # ---------------------------------------------------------- 5a. Healer mode
         root_result = None
         if process_root and facts["has_readme"] and facts["readme_commands"]:
             console.print("[bold yellow]⚔️ Mode 1: Verifying README Setup Instructions...[/bold yellow]\n")
             root_result = _heal_readme_steps(executor, engine, facts, target_path, readme_text,
-                                             patch_paths=all_readme_paths or None)
+                                             patch_paths=all_readme_paths or None, repo=repo_info)
             verified_commands = root_result["verified_commands"]
             readme_changed = root_result["readme_changed"]
 
@@ -625,7 +727,7 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
                     safe_read_text(ef["readme_path"], target_path),
                     display_name=rel,
                     context=f"This is {rel}, a {langs} project in the folder {folder}/ of the repository.",
-                    patch_paths=all_readme_paths,
+                    patch_paths=all_readme_paths, repo=repo_info,
                 )
                 row.update({k: result[k] for k in ("passed", "healed", "failed")})
                 if result["verified_commands"]:
@@ -682,6 +784,16 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
             executor.close()
         if temp_dir and os.path.exists(temp_dir):
             _remove_tree(temp_dir)
+
+
+def _origin_url(folder: Path):
+    """The `origin` remote of a local git repository, or None."""
+    try:
+        res = subprocess.run(["git", "-C", str(folder), "remote", "get-url", "origin"], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=15)
+        return res.stdout.strip() or None if res.returncode == 0 else None
+    except Exception:
+        return None
 
 
 def _host_python(cmd: str, mode: str) -> str:
