@@ -75,6 +75,10 @@ NONINTERACTIVE_ENV = {
     "npm_config_yes": "true",
     "npm_config_fund": "false",
     "npm_config_audit": "false",
+    # git asks for a username/password on the terminal itself (not stdin) for
+    # private or missing repositories; fail at once instead of waiting.
+    "GIT_TERMINAL_PROMPT": "0",
+    "GCM_INTERACTIVE": "never",
 }
 
 DOCKER_IMAGES = {
@@ -95,6 +99,33 @@ def _run(args, timeout: Optional[float] = 60, **kwargs) -> subprocess.CompletedP
         args, capture_output=True, text=True, encoding="utf-8", errors="replace",
         stdin=subprocess.DEVNULL, timeout=timeout, **kwargs,
     )
+
+
+def _run_detached(args, timeout: Optional[float], **kwargs) -> subprocess.CompletedProcess:
+    """
+    Like _run, but the step runs in its own session without a terminal
+    (macOS/Linux). Programs that ask a question on the terminal itself
+    (sudo, ssh, git passwords) then fail at once instead of waiting silently
+    for a key press. On a time-out or Ctrl+C the whole step is stopped,
+    including programs it started.
+    """
+    process = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+        text=True, encoding="utf-8", errors="replace", start_new_session=True, **kwargs,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, AttributeError):
+            process.kill()
+        try:
+            process.communicate(timeout=5)
+        except Exception:
+            pass  # a program that left the step's group still holds the output pipe
+        raise
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 def docker_status() -> Dict[str, Any]:
@@ -312,7 +343,7 @@ class CommandExecutor:
 
     def _posix_once(self, command: str, timeout: int) -> Dict[str, Any]:
         script = _bash_step_script(command, self._env_file)
-        res = _run(["bash", "-c", script], timeout=timeout, cwd=self.cwd, env=self._local_env())
+        res = _run_detached(["bash", "-c", script], timeout=timeout, cwd=self.cwd, env=self._local_env())
         stdout, folder = _split_marker(res.stdout)
         if res.returncode == 0 and folder and os.path.isdir(folder):
             self.cwd = folder

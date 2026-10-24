@@ -518,16 +518,22 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
             temp_dir = tempfile.mkdtemp(prefix="bugslayer_")
             with console.status("[bold green]Downloading repository...", spinner="dots"):
                 try:
+                    # No terminal prompts: a private or misspelled repository would
+                    # otherwise wait, hidden behind the spinner, for a password.
+                    clone_env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
                     res = subprocess.run(
                         ["git", "clone", "--depth", "1", "--", target, temp_dir],
                         capture_output=True, text=True, encoding="utf-8", errors="replace",
-                        stdin=subprocess.DEVNULL, timeout=180,
+                        stdin=subprocess.DEVNULL, timeout=180, env=clone_env,
+                        **({} if os.name == "nt" else {"start_new_session": True}),
                     )
                 except subprocess.TimeoutExpired:
                     console.print("[bold red]Cloning took longer than 3 minutes. Check your internet connection.[/bold red]")
                     return 1
             if res.returncode != 0:
-                console.print(f"[bold red]Failed to clone remote repository:[/bold red]\n{_e(res.stderr)}")
+                console.print(f"[bold red]Failed to clone remote repository:[/bold red] {_clone_hint(res.stderr)}")
+                if res.stderr.strip():
+                    console.print(f"[dim]{_e(res.stderr.strip()[-800:])}[/dim]")
                 return 1
             target_path = Path(temp_dir).resolve()
             console.print("[bold green]✔ Downloaded into a temporary folder[/bold green]\n")
@@ -817,6 +823,21 @@ def _syntax_error(command: str) -> str:
         return re.sub(r"^\S*bash: (?:-c: )?", "", res.stderr.strip().splitlines()[0])
     except Exception:
         return ""
+
+
+def _clone_hint(stderr: str) -> str:
+    """Explains a failed `git clone` in plain words."""
+    text = (stderr or "").lower()
+    if any(k in text for k in ("could not read username", "terminal prompts disabled", "authentication failed",
+                               "repository not found", "not found", "403", "permission denied (publickey)")):
+        return ("the repository was not found or is private. Check the URL; for a private repository, "
+                "clone it yourself and run [bold]bugslayer <folder>[/bold] on the folder.")
+    if "host key verification failed" in text:
+        return "this computer does not trust the server's SSH key yet. Use the https:// URL instead."
+    if any(k in text for k in ("could not resolve host", "unable to access", "network is unreachable",
+                               "connection timed out", "failed to connect")):
+        return "the server could not be reached. Check your internet connection and the URL."
+    return "see git's message below."
 
 
 def _origin_url(folder: Path):
