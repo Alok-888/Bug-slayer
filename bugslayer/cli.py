@@ -145,6 +145,49 @@ def _choose_sandbox(requested: str) -> str:
     return ""
 
 
+def _can_write_to(folder: Path) -> bool:
+    """True if `folder` can be created and a file can be written inside it."""
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        probe = folder / ".bugslayer_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _choose_output_dir(out_dir: Path, repo_name: str):
+    """
+    Returns a folder the results can be saved in, or None to skip saving.
+    If `out_dir` is read-only (e.g. the run started in /), the user is told
+    and asked whether to use their home folder instead.
+    """
+    if _can_write_to(out_dir):
+        return out_dir
+    home_dir = Path.home() / "bugslayer_output" / repo_name
+    console.print(Panel(
+        f"Bug Slayer can't save its results in [bold]{_e(str(out_dir.parent))}[/bold] "
+        "because that folder is read-only.\n"
+        f"Your home folder can be used instead: [bold]{_e(str(home_dir))}[/bold]",
+        title="[yellow]⚠ This folder is not writable[/yellow]", border_style="yellow",
+    ))
+    if sys.stdin is not None and sys.stdin.isatty():
+        try:
+            answer = console.input("[bold]Save the results to your home folder instead? \\[Y/n]: [/bold]")
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer.strip().lower() in ("n", "no"):
+            console.print("[yellow]Results were not saved.[/yellow]")
+            return None
+    else:
+        console.print("[dim]No one to ask (not an interactive terminal), so using the home folder.[/dim]")
+    if _can_write_to(home_dir):
+        return home_dir
+    console.print(f"[bold red]Your home folder is not writable either; results were not saved.[/bold red]")
+    return None
+
+
 def _export_outputs(target_path: Path, out_dir: Path, readme_changed: bool, extra_readmes: list = None):
     """
     Copies the results out of the temporary clone before it is deleted.
@@ -305,10 +348,15 @@ def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: 
             continue
 
         new_raw = cmd_info["raw"].replace(cmd, suggested_cmd, 1)
-        ok, diff = DocumentationPatcher.heal_readme(
-            facts["readme_path"], cmd_info["raw"], new_raw, explanation,
-            line_number=cmd_info.get("line"), display_name=display_name,
-        )
+        try:
+            ok, diff = DocumentationPatcher.heal_readme(
+                facts["readme_path"], cmd_info["raw"], new_raw, explanation,
+                line_number=cmd_info.get("line"), display_name=display_name,
+            )
+        except OSError as e:
+            console.print(f"[yellow]⚠ The fix works, but {_e(display_name)} could not be changed "
+                          f"(the folder is not writable): {_e(str(e))}[/yellow]")
+            ok, diff = False, ""
         if ok and diff:
             readme_changed = True
             healed += 1
@@ -325,6 +373,8 @@ def _heal_readme_steps(executor, engine, facts, target_path: Path, readme_text: 
                                 root=target_path, newline="\n")
             except UnsafePathError as e:
                 console.print(f"[yellow]⚠ Did not write fix-readme.patch: {_e(str(e))}[/yellow]")
+            except OSError as e:
+                console.print(f"[yellow]⚠ Could not write fix-readme.patch (the folder is not writable): {_e(str(e))}[/yellow]")
             console.print("[bold green]✨ Documentation healed and verified![/bold green]\n")
 
     console.print(Panel(
@@ -528,6 +578,9 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
                 console.print(f"[bold red]⚠ Did not write README.md: {_e(str(e))}[/bold red] "
                               "[red](this repository may be trying to overwrite a file on your computer)[/red]")
                 return 1
+            except OSError as e:
+                console.print(f"[bold red]⚠ Could not write README.md (the folder is not writable): {_e(str(e))}[/bold red]")
+                return 1
             console.print(Panel(
                 Syntax(readme_content, "markdown", theme="monokai", line_numbers=False),
                 title="[green]README.md[/green]",
@@ -599,10 +652,17 @@ def run_pipeline(target: str, sandbox: str = "auto", model: str = None, output: 
             except UnsafePathError as e:
                 console.print(f"[bold red]⚠ Did not write setup.sh: {_e(str(e))}[/bold red] "
                               "[red](this repository may be trying to overwrite a file on your computer)[/red]")
+            except OSError as e:
+                console.print(f"[yellow]⚠ Could not write setup.sh (the folder is not writable): {_e(str(e))}[/yellow]")
 
         if is_remote:
             out_dir = Path(output) if output else Path.cwd() / "bugslayer_output" / _repo_name(target)
-            saved = _export_outputs(target_path, out_dir.resolve(), readme_changed, extra_readmes=extra_changed)
+            out_dir = _choose_output_dir(out_dir.resolve(), _repo_name(target))
+            try:
+                saved = _export_outputs(target_path, out_dir, readme_changed, extra_readmes=extra_changed) if out_dir else []
+            except OSError as e:
+                console.print(f"[bold red]Could not save the results:[/bold red] {_e(str(e))}")
+                saved = []
             if saved:
                 console.print(Panel(
                     "\n".join(f"{_e(label)}: [bold yellow]{_e(str(path))}[/bold yellow]" for label, path in saved),
