@@ -47,30 +47,36 @@ It features a **Dual-Engine Architecture**:
 
 ---
 
-## 🚀 Quickstart
+## 🚀 Quickstart & Installation
 
-### ⚡ 1-Line Global Installation (Recommended)
-Install Bug Slayer directly from GitHub:
+Choose your operating system below to copy the direct installation command:
+
+### 🍏 For macOS & Linux
 ```bash
-# macOS / Linux:
 python3 -m pip install git+https://github.com/chauhanalok546-rgb/Bug-slayer.git
+```
 
-# Windows:
+### 🪟 For Windows (Command Prompt / PowerShell)
+```cmd
 python -m pip install git+https://github.com/chauhanalok546-rgb/Bug-slayer.git
 ```
 
-### 💻 Usage
-Run Bug Slayer from **any folder on your computer**:
+---
 
+## 💻 How to Use (Run From Anywhere)
+Once installed, you can invoke `bugslayer` from **any folder on your computer**:
+
+### 🌐 Test Any Public GitHub Repository:
 ```bash
-# 🌐 Pass any public GitHub URL directly:
 bugslayer https://github.com/elieh999/readme-clt.git
+```
 
-# 📂 Or point to any local project folder:
+### 📂 Test Any Local Project Directory:
+```bash
 bugslayer /path/to/any/project
 ```
 
-*(💡 Tip: If your terminal doesn't have Python scripts in PATH, you can also run it via: `python3 -m bugslayer.cli <url-or-path>`)*
+*(💡 **Note for all platforms:** If your terminal does not have Python script binaries linked in PATH, you can universally run it as: `python3 -m bugslayer.cli <url-or-path>` on Mac/Linux or `python -m bugslayer.cli <url-or-path>` on Windows)*.
 
 When run on a remote repository, Bug Slayer:
 1. Clones the code into an isolated sandbox.
